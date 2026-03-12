@@ -33,7 +33,7 @@ def _format_tool_list() -> str:
 
 
 # Files loaded in order; missing files are silently skipped
-PROMPT_FILES = ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md"]
+PROMPT_FILES = ["SOUL.md", "TASK.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md"]
 
 
 def _read_if_exists(path: Path) -> str | None:
