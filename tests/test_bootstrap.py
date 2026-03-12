@@ -472,10 +472,11 @@ class TestDockerTemplateIntegrity:
         volumes = parsed["services"]["nerve"]["volumes"]
         assert ".:/nerve" in volumes
         assert "~/.nerve:/root/.nerve" in volumes
-        assert "~/.claude:/root/.claude" in volumes
         assert "~/.config/gh:/root/.config/gh" in volumes
         assert "~/.config/gog:/root/.config/gog" in volumes
         assert "~/my-workspace:/root/nerve-workspace" in volumes
+        # ~/.claude is NOT mounted (macOS Keychain, not filesystem)
+        assert "~/.claude:/root/.claude" not in volumes
         # No named volumes section
         assert "volumes" not in parsed or parsed.get("volumes") is None
 
@@ -491,7 +492,6 @@ class TestDockerTemplateIntegrity:
         assert "~/.nerve:/root/.nerve" in volumes
         assert "~/ws:/root/nerve-workspace" in volumes
         # Optional auth mounts absent
-        assert "~/.claude:/root/.claude" not in volumes
         assert "~/.config/gh:/root/.config/gh" not in volumes
         assert "~/.config/gog:/root/.config/gog" not in volumes
 

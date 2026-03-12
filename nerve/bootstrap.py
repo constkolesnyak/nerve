@@ -1361,8 +1361,10 @@ def _build_docker_compose(
     # Optional auth mounts — only include if the host directory exists.
     # Docker would create missing dirs as root-owned empties, which
     # confuses the tools and pollutes the host filesystem.
+    # Note: ~/.claude is NOT mounted — macOS stores OAuth tokens in the
+    # system Keychain, not on disk. The entrypoint exports ANTHROPIC_API_KEY
+    # from config.local.yaml instead, which the claude CLI picks up.
     _optional_mounts = [
-        ("~/.claude", "/root/.claude", "claude CLI auth"),
         ("~/.config/gh", "/root/.config/gh", "gh CLI auth"),
         ("~/.config/gog", "/root/.config/gog", "gog CLI auth"),
     ]
@@ -1404,6 +1406,14 @@ pip install -e . --quiet 2>/dev/null
 if [ ! -d "web/dist" ]; then
     echo "Building web UI..."
     cd web && npm ci --quiet && npm run build && cd ..
+fi
+
+# Export API keys from config.local.yaml so the claude CLI (Agent SDK)
+# can authenticate without OAuth. macOS stores OAuth tokens in the
+# system Keychain which Docker can't access.
+if [ -z "$ANTHROPIC_API_KEY" ] && [ -f config.local.yaml ]; then
+    _key=$(python3 -c "import yaml; print(yaml.safe_load(open('config.local.yaml')).get('anthropic_api_key',''))" 2>/dev/null)
+    [ -n "$_key" ] && export ANTHROPIC_API_KEY="$_key"
 fi
 
 # If no arguments, default to init + start
