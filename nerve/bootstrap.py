@@ -921,6 +921,7 @@ class SetupWizard:
                 dim=True,
             )
             click.echo()
+            click.pause("  Press Enter to continue...")
             return
 
         # Preview what was generated
@@ -953,15 +954,14 @@ class SetupWizard:
             await proxy.start()
         else:
             api_key = self.choices.anthropic_api_key
-            base_url = "https://api.anthropic.com/v1/"
+            base_url = None  # Use SDK default
             proxy = None
 
         try:
-            client = anthropic.Anthropic(
-                api_key=api_key,
-                base_url=base_url,
-                timeout=120.0,
-            )
+            kwargs: dict[str, Any] = {"api_key": api_key, "timeout": 120.0}
+            if base_url:
+                kwargs["base_url"] = base_url.rstrip("/")
+            client = anthropic.Anthropic(**kwargs)
 
             response = client.messages.create(
                 model="claude-sonnet-4-6",
