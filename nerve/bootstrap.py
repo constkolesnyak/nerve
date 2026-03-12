@@ -218,7 +218,7 @@ def _resolve_claude_credential() -> tuple[str, str]:
     if sys.platform == "darwin" and shutil.which("security"):
         try:
             result = subprocess.run(
-                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                ["security", "find-generic-password", "-s", "Claude Code", "-w"],
                 capture_output=True, text=True, timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
