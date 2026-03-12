@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
 import { Plus, X, MessageSquare, ChevronRight, ChevronDown, Bot, Loader2, Search, Hammer } from 'lucide-react';
 import type { Session, AgentStatus } from '../../types/chat';
 import { groupByDate } from '../../utils/dateGroups';
@@ -109,6 +109,13 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onSelect,
     () => systemSessions.filter(s => s.is_running).length,
     [systemSessions],
   );
+
+  // Auto-expand system section when something starts running
+  useLayoutEffect(() => {
+    if (runningSystemCount > 0 && !systemExpanded) {
+      setSystemExpanded(true);
+    }
+  }, [runningSystemCount]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className={`bg-[#141414] border-r border-[#222] flex flex-col shrink-0 transition-all duration-200 overflow-hidden ${collapsed ? 'w-0 border-r-0' : 'w-60'}`}>

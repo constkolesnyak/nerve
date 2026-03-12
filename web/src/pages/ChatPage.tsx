@@ -7,6 +7,7 @@ import { ChatInput } from '../components/Chat/ChatInput';
 import { ContextBar } from '../components/Chat/ContextBar';
 import { TodoPanel } from '../components/Chat/TodoPanel';
 import { SidePanel } from '../components/Chat/SidePanel';
+import { BackgroundJobs } from '../components/Chat/BackgroundJobs';
 import { Loader2, PanelLeftOpen, PanelLeftClose, Files } from 'lucide-react';
 
 const STATUS_LABELS: Record<string, string> = {
@@ -100,6 +101,11 @@ export function ChatPage() {
               )}
             </div>
             <div className="flex items-center gap-2">
+              <BackgroundJobs
+                sessions={sessions}
+                activeSession={activeSession}
+                onSelect={switchSession}
+              />
               {fileCount > 0 && (
                 <button
                   onClick={openFilesPanel}

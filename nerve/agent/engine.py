@@ -11,6 +11,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -889,8 +891,15 @@ class AgentEngine:
         source: str = "web",
         channel: str | None = None,
         model: str | None = None,
+        internal: bool = False,
     ) -> str:
-        """Run the agent for a user message and return the final text response."""
+        """Run the agent for a user message and return the final text response.
+
+        Args:
+            internal: If True, the user_message is a system-generated trigger
+                      (e.g., background task completion) and won't be stored in
+                      DB or shown in the UI.
+        """
         if self.sessions.is_running(session_id):
             raise RuntimeError(f"Session {session_id} is already running")
 
@@ -906,6 +915,7 @@ class AgentEngine:
             try:
                 return await self._run_inner(
                     session_id, user_message, source, channel, model,
+                    internal=internal,
                 )
             finally:
                 self.sessions.mark_not_running(session_id)
@@ -924,13 +934,14 @@ class AgentEngine:
         source: str,
         channel: str | None,
         model: str | None,
+        internal: bool = False,
     ) -> str:
         # Ensure session exists in DB
         await self.sessions.get_or_create(session_id, source=source)
 
-        # Auto-title: generate a meaningful name for new sessions
         session = await self.db.get_session(session_id)
-        if session:
+
+        if not internal and session:
             current_title = session.get("title")
             if current_title in (None, "", session_id):
                 placeholder = user_message[:40].strip()
@@ -950,10 +961,10 @@ class AgentEngine:
                     self._generate_session_title(session_id, user_message),
                 )
 
-        # Store user message in DB
-        await self.sessions.add_message(
-            session_id, "user", user_message, channel=channel,
-        )
+            # Store user message in DB
+            await self.sessions.add_message(
+                session_id, "user", user_message, channel=channel,
+            )
 
         full_response_text = ""
         thinking_text = ""
@@ -1118,6 +1129,39 @@ class AgentEngine:
         # Merge tool results into tool_calls_log
         self._merge_tool_results(tool_calls_log, tool_results_map)
 
+        # Detect background tasks for auto-resume after turn ends.
+        # When Bash/Task runs with run_in_background, the result is only
+        # picked up on the NEXT engine.run() call.  We spawn a watcher that
+        # polls the output file and auto-triggers a new run when it's ready.
+        # NOTE: must run AFTER _merge_tool_results so tc["result"] is populated.
+        bg_tasks: list[dict] = []  # {output_file, tool, description, command, task_id}
+        for tc in tool_calls_log:
+            inp = tc.get("input") or {}
+            if not inp.get("run_in_background"):
+                continue
+            result_text = tc.get("result", "")
+            # Extract output file from result text
+            m = re.search(r"output_file:\s*(\S+)|Output is being written to:\s*(\S+)", result_text)
+            if not m:
+                logger.warning("Background task detected but no output file: %.200s", result_text)
+                continue
+            output_file = m.group(1) or m.group(2)
+            # Extract task ID
+            m_id = re.search(r"(?:ID|agentId):\s*(\S+)", result_text)
+            task_id = m_id.group(1).rstrip(".") if m_id else os.path.basename(output_file).replace(".output", "")
+            tool_name = tc.get("tool", "Bash")
+            description = inp.get("description", "")
+            command = inp.get("command", "")
+            # Truncate long commands for display
+            label = description or (command[:60] + "..." if len(command) > 60 else command) or tool_name
+            bg_tasks.append({
+                "output_file": output_file,
+                "task_id": task_id,
+                "tool": tool_name,
+                "label": label,
+            })
+            logger.info("Tracking background task %s: %s", task_id, label)
+
         # Store assistant message in DB
         await self.sessions.add_message(
             session_id, "assistant", full_response_text,
@@ -1153,7 +1197,151 @@ class AgentEngine:
             max_context_tokens=max_context,
         )
         self.sessions.touch(session_id)
+
+        # Spawn background task watcher if needed
+        if bg_tasks:
+            # Notify UI about running background tasks
+            await broadcaster.broadcast(session_id, {
+                "type": "background_tasks_update",
+                "session_id": session_id,
+                "tasks": [
+                    {"task_id": t["task_id"], "label": t["label"], "tool": t["tool"], "status": "running"}
+                    for t in bg_tasks
+                ],
+            })
+            asyncio.create_task(
+                self._watch_background_tasks(
+                    session_id, bg_tasks, source, channel,
+                )
+            )
+
         return full_response_text
+
+    async def _watch_background_tasks(
+        self,
+        session_id: str,
+        bg_tasks: list[dict],
+        source: str,
+        channel: str | None,
+    ) -> None:
+        """Poll background task output files and auto-trigger engine.run().
+
+        When tools run with run_in_background, the SDK subprocess exits after
+        the main turn.  The background process writes to an output file.
+        This watcher polls until the file is ready, then triggers a new
+        engine.run() so the model processes the result immediately instead
+        of waiting for the next user message.
+        """
+        poll_interval = 2  # seconds
+        max_wait = 600  # 10 minutes max
+        completed_ids: set[str] = set()
+
+        try:
+            elapsed = 0
+            while elapsed < max_wait:
+                await asyncio.sleep(poll_interval)
+                elapsed += poll_interval
+
+                all_done = True
+                newly_completed = False
+                for task in bg_tasks:
+                    if task["task_id"] in completed_ids:
+                        continue
+                    path = task["output_file"]
+                    if not os.path.exists(path):
+                        all_done = False
+                        continue
+                    try:
+                        size = os.path.getsize(path)
+                        if size == 0:
+                            all_done = False
+                            continue
+                        # Check if file is still being written (modified in last 2s)
+                        mtime = os.path.getmtime(path)
+                        if (time.time() - mtime) < 2:
+                            all_done = False
+                            continue
+                        # This task is done
+                        completed_ids.add(task["task_id"])
+                        newly_completed = True
+                    except OSError:
+                        all_done = False
+                        continue
+
+                # Broadcast progress to UI on any change
+                if newly_completed:
+                    await broadcaster.broadcast(session_id, {
+                        "type": "background_tasks_update",
+                        "session_id": session_id,
+                        "tasks": [
+                            {
+                                "task_id": t["task_id"],
+                                "label": t["label"],
+                                "tool": t["tool"],
+                                "status": "done" if t["task_id"] in completed_ids else "running",
+                            }
+                            for t in bg_tasks
+                        ],
+                    })
+
+                if all_done:
+                    break
+
+            if elapsed >= max_wait:
+                logger.warning(
+                    "Background task watcher timed out for session %s",
+                    session_id,
+                )
+                # Broadcast timeout status
+                await broadcaster.broadcast(session_id, {
+                    "type": "background_tasks_update",
+                    "session_id": session_id,
+                    "tasks": [
+                        {
+                            "task_id": t["task_id"],
+                            "label": t["label"],
+                            "tool": t["tool"],
+                            "status": "done" if t["task_id"] in completed_ids else "timeout",
+                        }
+                        for t in bg_tasks
+                    ],
+                })
+                return
+
+            # All background tasks done — auto-resume the session
+            logger.info(
+                "Background tasks completed for session %s, auto-resuming",
+                session_id,
+            )
+
+            if self.sessions.is_running(session_id):
+                logger.info(
+                    "Session %s already running, skipping auto-resume",
+                    session_id,
+                )
+                return
+
+            # Trigger a new engine.run() so the model picks up the
+            # background task notifications from the SDK
+            task = asyncio.create_task(
+                self.run(
+                    session_id=session_id,
+                    user_message=(
+                        "[Background tasks completed. "
+                        "Check the results with TaskOutput and report to the user.]"
+                    ),
+                    source=source,
+                    channel=channel,
+                    internal=True,
+                )
+            )
+            self.register_task(session_id, task)
+
+        except Exception as e:
+            logger.error(
+                "Background task watcher failed for session %s: %s",
+                session_id, e,
+            )
 
     # ------------------------------------------------------------------ #
     #  Cron / Hook runs                                                    #

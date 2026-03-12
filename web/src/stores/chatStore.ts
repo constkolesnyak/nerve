@@ -151,6 +151,9 @@ interface ChatState {
   modifiedFiles: ModifiedFileSummary[];
   modifiedFilesCount: number;
 
+  // Background tasks (run_in_background)
+  backgroundTasks: { task_id: string; label: string; tool: string; status: 'running' | 'done' | 'timeout'; startedAt: number }[];
+
   // Session search
   searchQuery: string;
   searchResults: Session[] | null;  // null = not searching
@@ -205,6 +208,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sidebarCollapsed: localStorage.getItem('nerve_sidebar_collapsed') === 'true',
   modifiedFiles: [],
   modifiedFilesCount: 0,
+  backgroundTasks: [],
   searchQuery: '',
   searchResults: null,
   searchLoading: false,
@@ -383,7 +387,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       isStreaming: false, agentStatus: { state: 'idle' }, contextUsage: null,
       currentTodos: [], pendingInteraction: null,
       panels: [], activePanelId: null, panelVisible: false,
-      modifiedFiles: [], modifiedFilesCount: 0,
+      modifiedFiles: [], modifiedFilesCount: 0, backgroundTasks: [],
     });
     ws.switchSession(id);
     try {
@@ -862,19 +866,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case 'session_running': {
         // Global broadcast: a session started or stopped running
         const runMsg = msg as Extract<WSMessage, { type: 'session_running' }>;
-        set(s => ({
-          sessions: s.sessions.map(sess =>
-            sess.id === runMsg.session_id
-              ? { ...sess, is_running: runMsg.is_running }
-              : sess,
-          ),
-          // Also update search results if present
-          searchResults: s.searchResults?.map(sess =>
-            sess.id === runMsg.session_id
-              ? { ...sess, is_running: runMsg.is_running }
-              : sess,
-          ) ?? null,
-        }));
+        set(s => {
+          const updates: Record<string, unknown> = {
+            sessions: s.sessions.map(sess =>
+              sess.id === runMsg.session_id
+                ? { ...sess, is_running: runMsg.is_running }
+                : sess,
+            ),
+            // Also update search results if present
+            searchResults: s.searchResults?.map(sess =>
+              sess.id === runMsg.session_id
+                ? { ...sess, is_running: runMsg.is_running }
+                : sess,
+            ) ?? null,
+          };
+          // Active session started running from a background trigger (e.g.,
+          // background task completion, answer injection) — enter streaming mode
+          // so the response is visible and input is disabled.
+          // Guard: sendMessage() already sets isStreaming before the WS message,
+          // so this only fires for server-initiated runs.
+          if (runMsg.session_id === s.activeSession && runMsg.is_running && !s.isStreaming) {
+            updates.isStreaming = true;
+            updates.streamingBlocks = [];
+            updates.agentStatus = { state: 'thinking' };
+          }
+          return updates;
+        });
         break;
       }
 
@@ -1034,6 +1051,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
               blocks: [{ type: 'text' as const, content: ai.content }],
             }],
           }));
+        }
+        break;
+      }
+
+      case 'background_tasks_update': {
+        const bt = msg as Extract<WSMessage, { type: 'background_tasks_update' }>;
+        if (bt.session_id === state.activeSession) {
+          set(s => {
+            // Merge: keep startedAt from existing entries, add new ones
+            const existing = new Map(s.backgroundTasks.map(t => [t.task_id, t]));
+            const updated = bt.tasks.map(t => ({
+              ...t,
+              startedAt: existing.get(t.task_id)?.startedAt || Date.now(),
+            }));
+            return { backgroundTasks: updated };
+          });
         }
         break;
       }
