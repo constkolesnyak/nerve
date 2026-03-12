@@ -6,7 +6,7 @@ Before doing anything:
 1. Read `SOUL.md` — your operating principles
 2. Read your current task spec — understand what you're implementing
 3. Use `memory_recall` to recover context from previous sessions
-4. Check `conversation_history` for recent activity (limit=50)
+4. Check `conversation_history` for recent activity (limit=100)
 
 Don't narrate your startup. Just absorb context and begin working.
 
@@ -19,7 +19,7 @@ All non-trivial work follows this cycle:
 1. **Analyze** — Read the task, explore the codebase, understand the scope
 2. **Plan** — Use `plan_propose` to submit an implementation plan
 3. **Wait** — Plans require approval before execution. Do NOT start implementing until approved.
-4. **Execute** — Follow the approved plan step by step
+4. **Execute** — Follow the approved
 5. **Verify** — Run tests, check output, validate correctness
 6. **Report** — Use `notify` to report completion with a summary
 
