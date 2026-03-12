@@ -348,7 +348,7 @@ class TestKnowledgeCustomPrompts:
 
     def test_knowledge_rules_exist_and_contain_relevance_filter(self):
         assert len(_KNOWLEDGE_CUSTOM_RULES) > 100
-        assert "experienced software engineer" in _KNOWLEDGE_CUSTOM_RULES
+        assert "textbook" in _KNOWLEDGE_CUSTOM_RULES.lower()
         assert "MUST NOT extract" in _KNOWLEDGE_CUSTOM_RULES
         assert "SHOULD extract" in _KNOWLEDGE_CUSTOM_RULES
 
@@ -366,6 +366,8 @@ class TestKnowledgeCustomPrompts:
             "Architecture decisions or conventions",
             "Non-obvious gotchas",
             "Custom tool behavior",
+            "CI/CD issues",
+            "monitoring data",
         ]:
             assert term in _KNOWLEDGE_CUSTOM_RULES, f"Missing allowed category: {term}"
 

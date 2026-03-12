@@ -137,10 +137,9 @@ Important: Extract only knowledge directly stated or discussed in the conversati
 - User-specific traits, events, or behaviors are not knowledge items.
 
 ## CRITICAL: Relevance filter
-Apply this test to EVERY candidate knowledge item:
-"If an experienced software engineer could answer this without access to the user's specific codebase, projects, or environment, it is NOT worth storing."
+The goal is to filter out TEXTBOOK knowledge — things you'd find in documentation, tutorials, or Stack Overflow. We want to KEEP anything tied to the user's specific work, projects, or environment.
 
-MUST NOT extract (general knowledge):
+MUST NOT extract (textbook/generic knowledge):
 - Programming language features, syntax, or standard library behavior (e.g., how decorators work, json.dumps behavior, async/await)
 - Common CS concepts (hashing, caching, serialization, data structures, algorithms)
 - Well-known framework/library behavior (React hooks, FastAPI routing, SQLAlchemy sessions, Pydantic validation)
@@ -148,15 +147,20 @@ MUST NOT extract (general knowledge):
 - Common error patterns and their standard fixes (numpy truthiness checks, GIL limitations)
 - Widely documented API behavior of popular libraries
 
-SHOULD extract (project-specific knowledge):
+SHOULD extract (project-specific or user-specific knowledge):
 - Architecture decisions or conventions specific to the user's projects
 - Non-obvious gotchas discovered in the user's environment or toolchain
 - Custom tool behavior, internal API quirks, or undocumented behavior the user discovered
 - How two systems interact in the user's specific setup
 - Configuration or deployment details unique to the user's infrastructure
+- Work-related findings: CI/CD issues, bug reports, test failures, monitoring data tied to the user's projects
+- Domain-specific data the user tracks or works with (issue trackers, project status, team findings)
+- Summaries of project-specific technical investigations or root cause analyses
+
+The test: "Could you find this in public documentation or a textbook?" If YES → skip. If NO (it's specific to this user's work) → extract.
 
 ## Forbidden content
-- General programming/CS/DevOps knowledge any experienced developer already knows
+- Textbook programming/CS/DevOps knowledge found in standard documentation
 - Opinions or subjective statements without factual basis
 - Personal experiences or events (these belong to event type)
 - User preferences or behavioral patterns (these belong to profile/behavior type)
@@ -166,7 +170,7 @@ SHOULD extract (project-specific knowledge):
 - Merge similar items: keep only one and assign a single category.
 - Resolve conflicts: keep the latest / most certain item.
 - Final check: every item must pass the relevance filter above.
-- If no items pass the filter, return an empty result. An empty result is CORRECT and preferred over storing generic knowledge.
+- If no items pass the filter, return an empty result.
 """
 
 _KNOWLEDGE_CUSTOM_EXAMPLES = """
@@ -199,7 +203,22 @@ Example 1: Filtering generic vs. project-specific knowledge
 - HTTP/2 hang on Pi — non-obvious, environment-specific gotcha. EXTRACTED.
 - memu_bridge.py warmup workaround — project-specific architecture knowledge. EXTRACTED.
 
-Example 2: Empty result is correct
+Example 2: Work-specific data SHOULD be extracted
+## Input
+[0] 2026-03-12T09:00:00 [assistant]: ClickHouse CI Monitor found 3 new issues: #99258 ReadBuffer canceled (Mar 11), #99257 View bad result after re-attaching (Mar 11), #99195 Expected file not to exist (Mar 10). Also 5 libFuzzer tests consistently failing on NightlyFuzzers.
+## Output
+<item>
+    <memory>
+        <content>ClickHouse CI Monitor tracked issues as of March 12, 2026: #99258 ReadBuffer canceled, #99257 View bad result after re-attaching, #99195 Expected file not to exist, plus 5 consistently failing libFuzzer tests on NightlyFuzzers</content>
+        <categories>
+            <category>ClickHouse</category>
+        </categories>
+    </memory>
+</item>
+## Explanation
+These are specific CI findings from the user's project — issue numbers, error descriptions, and test status. This is NOT generic knowledge; it's project-specific monitoring data. EXTRACTED.
+
+Example 3: Empty result when only generic knowledge discussed
 ## Input
 [0] 2026-03-05T14:00:00 [user]: Can you explain how Python's GIL works?
 [1] 2026-03-05T14:01:00 [assistant]: The GIL is a mutex that allows only one thread to execute Python bytecodes at a time...
@@ -209,7 +228,7 @@ Example 2: Empty result is correct
 <item>
 </item>
 ## Explanation
-Python GIL and asyncio vs threading are standard CS knowledge. Nothing project-specific was discussed. An empty result is correct.
+Python GIL and asyncio vs threading are textbook CS knowledge. Nothing project-specific was discussed. Empty result is correct here.
 """
 
 
