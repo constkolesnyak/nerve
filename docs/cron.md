@@ -60,6 +60,7 @@ jobs:
 | `session_mode` | string | no | `isolated` (new session per run), `persistent` (reuse context), or `main` |
 | `context_rotate_hours` | int | no | Hours before persistent context resets (default: 24, 0 = never) |
 | `reminder_mode` | bool | no | Persistent only: send short reminder instead of full prompt on subsequent runs (default: false) |
+| `catchup` | bool | no | Fire once on startup if the job missed a run while the server was down (default: true) |
 | `enabled` | bool | no | Whether the job is active (default: true) |
 
 ## Session Modes
@@ -123,6 +124,34 @@ Identifies repeated workflows and domain knowledge from recent conversations, me
 Reviews all existing skills for accuracy (outdated paths, credentials), completeness (missing steps, known issues), and quality (trigger phrases, examples). Proposes revisions via task+plan system.
 
 Both skill jobs use `source="skill-extractor"` or `source="skill-reviser"` on created tasks. When their plans are approved, the plan approval handler creates/updates the skill directly from the plan content (which is a full SKILL.md file) instead of spawning an implementation session.
+
+## Persistent Timers
+
+Cron schedules survive server restarts. On startup, the cron service queries `cron_logs` for each job's last successful run and uses that to restore correct timing.
+
+### Interval alignment
+
+For interval schedules (e.g. `4h`), the trigger is anchored to the last run time. If a job last ran 2.5 hours ago and the interval is 4 hours, the next fire is in 1.5 hours — not 4 hours from now.
+
+### Startup catch-up
+
+If a job should have fired while the server was down, it fires **once** on startup — regardless of how many runs were missed. This applies to both interval and crontab schedules.
+
+- **First-ever run**: No catch-up (no history to compare against).
+- **Multiple missed fires**: Coalesced into a single catch-up run.
+- **Catch-up runs concurrently**: All overdue jobs fire in parallel, in the background (doesn't block startup).
+
+### Opting out
+
+Set `catchup: false` on jobs where a late run doesn't make sense:
+
+```yaml
+  - id: morning-briefing
+    schedule: "0 12 * * *"
+    catchup: false        # no point running a morning briefing at 3pm
+```
+
+Interval alignment still applies even with `catchup: false` — only the startup catch-up fire is skipped.
 
 ## Source Runners
 

@@ -5,6 +5,7 @@ Runs cron jobs and source runners on schedule.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -40,6 +41,15 @@ def _parse_interval(interval: str) -> int:
     return total or 7200  # Default 2h
 
 
+def _parse_timestamp(ts: str) -> datetime:
+    """Parse a UTC timestamp string from the database into an aware datetime."""
+    if "T" not in ts:
+        ts = ts.replace(" ", "T")
+    if not ts.endswith(("Z", "+00:00")):
+        ts += "+00:00"
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
 class CronService:
     """Manages scheduled cron jobs."""
 
@@ -56,17 +66,12 @@ class CronService:
         # Load job definitions from both files
         self._jobs = self._load_merged_jobs()
 
-        # Register cron jobs
+        # Register cron jobs with persistent timer alignment
         for job in self._jobs:
             if not job.enabled:
                 continue
 
-            try:
-                trigger = CronTrigger.from_crontab(job.schedule)
-            except ValueError:
-                # Try as interval
-                seconds = _parse_interval(job.schedule)
-                trigger = IntervalTrigger(seconds=seconds)
+            trigger = await self._make_trigger(job)
 
             self.scheduler.add_job(
                 self._run_job_wrapper,
@@ -127,10 +132,81 @@ class CronService:
             len(self._jobs), len(self._source_runners),
         )
 
+        # Catch up missed jobs in background (don't block startup)
+        asyncio.create_task(self._catchup_missed_jobs())
+
     async def stop(self) -> None:
         """Stop the scheduler."""
         self.scheduler.shutdown(wait=False)
         logger.info("Cron service stopped")
+
+    # -- Persistent timers -------------------------------------------------
+
+    async def _make_trigger(self, job: CronJob) -> CronTrigger | IntervalTrigger:
+        """Create an APScheduler trigger for a job.
+
+        For interval schedules, anchors to the last successful run so
+        the cadence survives restarts (persistent timer).
+        """
+        try:
+            return CronTrigger.from_crontab(job.schedule)
+        except ValueError:
+            pass
+
+        seconds = _parse_interval(job.schedule)
+        last_run = await self.db.get_last_successful_cron_run(job.id)
+        if last_run and last_run.get("finished_at"):
+            start_date = _parse_timestamp(last_run["finished_at"])
+            logger.debug(
+                "Aligning interval for %s: start_date=%s", job.id, start_date,
+            )
+            return IntervalTrigger(seconds=seconds, start_date=start_date)
+        return IntervalTrigger(seconds=seconds)
+
+    async def _catchup_missed_jobs(self) -> None:
+        """Fire jobs that should have run while the server was down.
+
+        Each overdue job fires exactly once regardless of how many runs
+        were missed.  Jobs run concurrently.
+        """
+        now = datetime.now(timezone.utc)
+        overdue: list[CronJob] = []
+
+        for job in self._jobs:
+            if not job.enabled or not job.catchup:
+                continue
+
+            last_run = await self.db.get_last_successful_cron_run(job.id)
+            if not last_run or not last_run.get("finished_at"):
+                continue  # first-ever run — no catch-up
+
+            last_time = _parse_timestamp(last_run["finished_at"])
+            if self._is_overdue(job, last_time, now):
+                overdue.append(job)
+
+        if not overdue:
+            return
+
+        logger.info(
+            "Catching up %d missed jobs: %s",
+            len(overdue), [j.id for j in overdue],
+        )
+        await asyncio.gather(
+            *(self._run_job_wrapper(job) for job in overdue),
+        )
+
+    @staticmethod
+    def _is_overdue(job: CronJob, last_run: datetime, now: datetime) -> bool:
+        """Check if a job should have fired between *last_run* and *now*."""
+        try:
+            trigger = CronTrigger.from_crontab(job.schedule)
+            next_fire = trigger.get_next_fire_time(last_run, last_run)
+            return next_fire is not None and next_fire < now
+        except ValueError:
+            seconds = _parse_interval(job.schedule)
+            return (now - last_run).total_seconds() >= seconds
+
+    # -- End persistent timers ---------------------------------------------
 
     async def _maybe_rotate_context(
         self, session_id: str, rotate_hours: int,

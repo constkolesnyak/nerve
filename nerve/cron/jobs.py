@@ -26,6 +26,7 @@ class CronJob:
     session_mode: str = "isolated"  # "isolated" (new session per run) or "persistent" (reuse context)
     context_rotate_hours: int = 24  # Hours before persistent context is rotated (0 = never)
     reminder_mode: bool = False  # Persistent only: send short reminder instead of full prompt on subsequent runs
+    catchup: bool = True  # Fire once on startup if missed while server was down
     enabled: bool = True
     metadata: dict = field(default_factory=dict)
 
@@ -40,6 +41,7 @@ class CronJob:
             session_mode=d.get("session_mode", "isolated"),
             context_rotate_hours=int(d.get("context_rotate_hours", 24)),
             reminder_mode=bool(d.get("reminder_mode", False)),
+            catchup=d.get("catchup", True),
             enabled=d.get("enabled", True),
             metadata=d.get("metadata", {}),
         )
@@ -87,6 +89,7 @@ def save_jobs(jobs: list[CronJob], jobs_file: Path) -> None:
             "session_mode": job.session_mode,
             "context_rotate_hours": job.context_rotate_hours,
             "reminder_mode": job.reminder_mode,
+            "catchup": job.catchup,
             "enabled": job.enabled,
             "metadata": job.metadata,
         })
