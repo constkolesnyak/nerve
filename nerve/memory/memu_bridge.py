@@ -823,7 +823,12 @@ class MemUBridge:
                 memorize_config={
                     "enable_item_reinforcement": True,
                     "memory_types": ["profile", "event", "knowledge", "behavior"],
-                    "preprocess_llm_profile": memorize_profile,
+                    # Use fast (Haiku) for preprocessing — it's a mechanical task
+                    # (conversation segmentation + summarization) where Haiku is
+                    # faster and more reliable.  Sonnet can misinterpret technical
+                    # conversations as instructions, generating long off-topic
+                    # responses that exceed the per-call timeout.
+                    "preprocess_llm_profile": fast_profile,
                     "memory_extract_llm_profile": memorize_profile,
                     "category_update_llm_profile": fast_profile,
                     # Pass Nerve's configured categories to memU so the LLM
