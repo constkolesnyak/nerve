@@ -1059,6 +1059,7 @@ def _build_docker_compose(
     volumes = [
         ".:/nerve",
         "~/.nerve:/root/.nerve",
+        "~/.claude:/root/.claude",  # claude CLI auth tokens
         f"{workspace_path}:/root/nerve-workspace",
     ]
     if extra_mounts:

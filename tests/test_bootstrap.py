@@ -469,6 +469,7 @@ class TestDockerTemplateIntegrity:
         volumes = parsed["services"]["nerve"]["volumes"]
         assert ".:/nerve" in volumes
         assert "~/.nerve:/root/.nerve" in volumes
+        assert "~/.claude:/root/.claude" in volumes
         assert "~/my-workspace:/root/nerve-workspace" in volumes
         # No named volumes section
         assert "volumes" not in parsed or parsed.get("volumes") is None
