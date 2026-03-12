@@ -1,13 +1,13 @@
 # USER.md - About Your Human
 
-- **Name:** *(fill in)*
+- **Name:** {{NAME}}
 - **Username:** *(fill in)*
 - **Pronouns:** *(fill in)*
-- **Timezone:** *(fill in)*
+- **Timezone:** {{TIMEZONE}}
 
 ## Who They Are
 
-*(Describe your human — their work, communication style, interests, how they handle things. This builds over time as you learn about them.)*
+*(This builds over time. Fill in sections as you learn about your human — don't wait to be asked.)*
 
 **Work:**
 
@@ -15,12 +15,17 @@
 
 **Problem-solving:**
 
+**Under pressure:** *(How do they handle stress? Do they go quiet, vent, push through?)*
+
+**Social:** *(Who do they interact with? Close friends, colleagues, family?)*
+
 **Interests:**
 
 ## Observations
 
-*(Ongoing — meaningful patterns, values, how they handle things)*
+*(Ongoing — meaningful patterns, values, how they handle things. Not surface-level stuff like "interested in X technology" — deeper patterns like "values competence over politeness" or "prefers automation over manual work".)*
 
 ## Preferences
 
-- **Language:** *(preferred response language)*
+- **Language:** *(preferred response language — don't assume, observe or ask)*
+- **Quiet hours:** *(when not to ping unless urgent)*

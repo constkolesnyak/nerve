@@ -24,7 +24,10 @@
 
 ## Your Human
 - **Name:** *(fill in)* `[stable]`
+- **Email:** *(fill in)* `[stable]`
 - **Timezone:** *(fill in)* `[stable]`
+- **Primary chat:** *(platform and ID — e.g., Telegram @username, Discord #id)* `[stable]`
+- **Quiet hours:** *(e.g., 02:00-12:00 — don't ping unless urgent)* `[stable]`
 
 ## Active Context
 
