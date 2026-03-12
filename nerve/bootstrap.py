@@ -141,6 +141,21 @@ PRODUCTIVITY_CRONS = [
     },
 ]
 
+# Default memory categories for a fresh install.
+# Generic enough for any user — they can customize in config.yaml later.
+_DEFAULT_MEMORY_CATEGORIES = [
+    {"name": "personal_info", "description": "Identity, contact details, timezone, background"},
+    {"name": "preferences", "description": "Communication style, tool preferences, how things should be done"},
+    {"name": "relationships", "description": "People, dynamics, contact context"},
+    {"name": "work", "description": "Job, projects, PRs, code reviews, meetings"},
+    {"name": "infrastructure", "description": "Servers, deployments, CI/CD, system ops"},
+    {"name": "finances", "description": "Accounts, payments, subscriptions, budgets"},
+    {"name": "tasks_deadlines", "description": "Active tasks, deadlines, pending follow-ups"},
+    {"name": "conversations", "description": "Key things said, promises, follow-ups"},
+    {"name": "agent_ops", "description": "Operational lessons, memory design, prompt tuning"},
+    {"name": "people", "description": "Information and facts about people"},
+]
+
 
 @dataclass
 class SetupChoices:
@@ -1065,6 +1080,7 @@ class SetupWizard:
                 "memorize_model": "claude-sonnet-4-6",
                 "fast_model": "claude-haiku-4-5-20251001",
                 "embed_model": "text-embedding-3-small",
+                "categories": _DEFAULT_MEMORY_CATEGORIES,
             },
             "cron": {
                 "system_file": "~/.nerve/cron/system.yaml",
