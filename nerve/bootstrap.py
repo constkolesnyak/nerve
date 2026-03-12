@@ -965,12 +965,8 @@ WORKDIR /nerve
 
 # Pre-install Python dependencies for caching
 COPY pyproject.toml /tmp/pyproject.toml
-RUN pip install --no-cache-dir $(python3 -c "
-import tomllib
-with open('/tmp/pyproject.toml', 'rb') as f:
-    deps = tomllib.load(f)['project']['dependencies']
-print(' '.join(repr(d) for d in deps))
-") && rm /tmp/pyproject.toml
+RUN pip install --no-cache-dir $(python3 -c "import tomllib; print(' '.join(repr(d) for d in tomllib.load(open('/tmp/pyproject.toml','rb'))['project']['dependencies']))") \\
+    && rm /tmp/pyproject.toml
 
 EXPOSE 8900
 
