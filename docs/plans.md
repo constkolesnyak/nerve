@@ -25,6 +25,7 @@ User reviews (via /plans UI or chat tools)
 |------|-------------|
 | `plan_propose` | Propose an implementation plan for a task. Stored for async human review. |
 | `plan_list` | List existing plans. Used to check which tasks already have pending plans. |
+| `plan_read` | Read full plan content. Used to review details before approving/declining. |
 | `plan_approve` | Approve a pending plan and spawn an implementation session. |
 | `plan_decline` | Decline a pending plan with optional feedback. |
 | `plan_revise` | Request revision of a pending plan — sends feedback to the planner session. |
@@ -42,6 +43,12 @@ User reviews (via /plans UI or chat tools)
 
 - Default: returns pending + implementing plans
 - Supports filtering: `pending`, `approved`, `declined`, `implementing`, `superseded`
+
+### `plan_read(plan_id)`
+
+- Fetches full plan record from database (joins with task for title)
+- Returns formatted header (ID, version, status, task, type, dates, feedback, impl session) + full plan content
+- Used by agents to inspect a plan before taking action (approve/decline/revise)
 
 ### `plan_approve(plan_id)`
 

@@ -57,7 +57,7 @@ export function ToolCallBlock({ block }: { block: ToolCallBlockData }) {
   if (block.tool.includes('memory') || block.tool.includes('memorize') || block.tool.includes('recall') || block.tool.includes('conversation_history') || block.tool.includes('sync_status')) {
     return <MemoryToolBlock block={block} />;
   }
-  if (block.tool.includes('plan_propose') || block.tool.includes('plan_list')) {
+  if (block.tool.includes('plan_')) {
     return <PlanToolBlock block={block} />;
   }
   if (block.tool.includes('skill_list') || block.tool.includes('skill_get') || block.tool.includes('skill_read_reference') || block.tool.includes('skill_run_script') || block.tool.includes('skill_create') || block.tool.includes('skill_update')) {

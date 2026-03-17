@@ -1086,6 +1086,37 @@ async def plan_list(args: dict) -> dict:
 
 
 @tool(
+    "plan_read",
+    "Read the full content of a plan. Use this to review a plan's details before approving, declining, or revising it.",
+    {
+        "plan_id": {"type": "string", "description": "The plan ID to read (e.g. plan-abc12345)"},
+    },
+)
+async def plan_read(args: dict) -> dict:
+    plan_id = args["plan_id"]
+
+    if not _db:
+        return {"content": [{"type": "text", "text": "Database not available."}]}
+
+    plan = await _db.get_plan(plan_id)
+    if not plan:
+        return {"content": [{"type": "text", "text": f"Plan not found: {plan_id}"}]}
+
+    task_title = plan.get("task_title", plan.get("task_id", "?"))
+    header = (
+        f"**Plan {plan['id']}** v{plan['version']} [{plan['status']}]\n"
+        f"Task: {task_title} ({plan['task_id']})\n"
+        f"Type: {plan.get('plan_type', 'generic')} | Created: {plan['created_at'][:10]}"
+    )
+    if plan.get("feedback"):
+        header += f"\nFeedback: {plan['feedback']}"
+    if plan.get("impl_session_id"):
+        header += f"\nImpl session: {plan['impl_session_id']}"
+
+    return {"content": [{"type": "text", "text": f"{header}\n\n---\n\n{plan['content']}"}]}
+
+
+@tool(
     "plan_approve",
     "Approve a pending plan and spawn an implementation session. Use when the user approves a proposed plan.",
     {
