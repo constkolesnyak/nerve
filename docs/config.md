@@ -153,6 +153,15 @@ mcp_servers:
 
 The built-in `nerve` server (SDK type, in-process) is always present and cannot be overridden.
 
+### Claude Code Plugins
+
+Nerve automatically discovers MCP servers from Claude Code's enabled plugins. Any plugin enabled in `~/.claude/settings.json` is loaded via the SDK's `--plugin-dir` flag, so the CLI handles OAuth, credentials, and plugin lifecycle natively.
+
+- **No config needed** — just enable a plugin in Claude Code and restart Nerve.
+- **OAuth works** — the CLI uses cached tokens from `~/.claude/.credentials.json`.
+- **Auto-registered in UI** — plugin MCP servers appear in the MCP Servers page on first tool invocation (type: `plugin`).
+- **No conflicts** — Nerve-configured MCPs (from `config.yaml`) and Claude Code plugin MCPs coexist; they use separate mechanisms (`--mcp-config` vs `--plugin-dir`).
+
 ## Auth
 
 | Key | Type | Default | Description |

@@ -2,12 +2,14 @@ import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { RefreshCw, Zap, CheckCircle, XCircle, Clock, Plug } from 'lucide-react';
 import { useMcpStore, type McpServer } from '../stores/mcpStore';
+import { formatMcpName } from '../utils/formatMcpName';
 
 const TYPE_COLORS: Record<string, string> = {
   sdk: 'text-[#6366f1] bg-[#6366f1]/10',
   stdio: 'text-emerald-400 bg-emerald-400/10',
   sse: 'text-amber-400 bg-amber-400/10',
   http: 'text-sky-400 bg-sky-400/10',
+  plugin: 'text-violet-400 bg-violet-400/10',
 };
 
 function ServerCard({ server }: { server: McpServer }) {
@@ -25,7 +27,7 @@ function ServerCard({ server }: { server: McpServer }) {
       <div className="flex items-start justify-between mb-2">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <h3 className="text-sm font-medium text-[#e0e0e0] truncate">{server.name}</h3>
+            <h3 className="text-sm font-medium text-[#e0e0e0] truncate">{formatMcpName(server.name)}</h3>
             <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${typeClass}`}>
               {server.type}
             </span>

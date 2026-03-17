@@ -6,12 +6,16 @@ Supports ~ expansion in paths and environment variable references.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -437,6 +441,104 @@ def _parse_mcp_servers(d: dict) -> list[McpServerConfig]:
             if isinstance(cfg, dict)]
 
 
+def _get_enabled_claude_code_plugins(
+    claude_dir: Path | None = None,
+) -> list[tuple[str, Path]]:
+    """Find enabled Claude Code plugin directories.
+
+    Returns list of (plugin_key, plugin_dir) tuples for each enabled plugin
+    that has a cached installation with .mcp.json.
+    """
+    if claude_dir is None:
+        claude_dir = Path.home() / ".claude"
+
+    settings_path = claude_dir / "settings.json"
+    if not settings_path.exists():
+        return []
+
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        logger.debug("Could not read Claude Code settings: %s", e)
+        return []
+
+    enabled_plugins: dict = settings.get("enabledPlugins", {})
+    if not isinstance(enabled_plugins, dict):
+        return []
+
+    plugins_dir = claude_dir / "plugins"
+    result: list[tuple[str, Path]] = []
+
+    for plugin_key, is_enabled in enabled_plugins.items():
+        if not is_enabled:
+            continue
+
+        # Key format: "name@marketplace"
+        parts = plugin_key.split("@", 1)
+        if len(parts) != 2:
+            logger.debug("Skipping malformed plugin key: %s", plugin_key)
+            continue
+        name, marketplace = parts
+
+        plugin_dir = _find_plugin_dir(plugins_dir, marketplace, name)
+        if plugin_dir is None:
+            logger.debug("No plugin dir found for %s", plugin_key)
+            continue
+
+        result.append((plugin_key, plugin_dir))
+
+    return result
+
+
+def load_claude_code_plugins(
+    claude_dir: Path | None = None,
+) -> list[dict[str, str]]:
+    """Return SDK-compatible plugin configs for enabled Claude Code plugins.
+
+    Each entry is ``{"type": "local", "path": "<dir>"}`` suitable for
+    ``ClaudeAgentOptions.plugins``.
+    """
+    plugins = _get_enabled_claude_code_plugins(claude_dir)
+    result: list[dict[str, str]] = []
+    for plugin_key, plugin_dir in plugins:
+        logger.debug("Claude Code plugin %s → %s", plugin_key, plugin_dir)
+        result.append({"type": "local", "path": str(plugin_dir)})
+    return result
+
+
+def _find_plugin_dir(
+    plugins_dir: Path, marketplace: str, name: str,
+) -> Path | None:
+    """Locate the directory of a Claude Code plugin.
+
+    Checks cache/ (installed plugins with versioned dirs) first,
+    then falls back to marketplaces/ (external plugin definitions).
+    """
+    # Cache: ~/.claude/plugins/cache/<marketplace>/<name>/<version>/
+    cache_dir = plugins_dir / "cache" / marketplace / name
+    if cache_dir.is_dir():
+        versions = sorted(
+            (d for d in cache_dir.iterdir() if d.is_dir()),
+            key=lambda d: d.name,
+            reverse=True,
+        )
+        for v in versions:
+            if (v / ".mcp.json").exists():
+                return v
+
+    # Marketplace: external_plugins/<name>/
+    ext_dir = plugins_dir / "marketplaces" / marketplace / "external_plugins" / name
+    if (ext_dir / ".mcp.json").exists():
+        return ext_dir
+
+    # Marketplace: plugins/<name>/
+    plugin_dir = plugins_dir / "marketplaces" / marketplace / "plugins" / name
+    if (plugin_dir / ".mcp.json").exists():
+        return plugin_dir
+
+    return None
+
+
 @dataclass
 class NerveConfig:
     workspace: Path = field(default_factory=lambda: Path("~/nerve-workspace"))
@@ -509,6 +611,9 @@ def load_mcp_servers(config_dir: Path | None = None) -> list[McpServerConfig]:
 
     Called per session creation and on reload to pick up config changes
     without restarting Nerve.
+
+    Note: Claude Code plugin MCPs are handled separately via the SDK
+    ``plugins`` field (--plugin-dir), not through this function.
     """
     if config_dir is None:
         config_dir = Path.cwd()

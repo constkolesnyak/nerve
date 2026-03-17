@@ -105,6 +105,7 @@ class AgentEngine:
         self._memorize_lock = asyncio.Lock()
         self._router = None  # ChannelRouter — lazy-initialized via .router property
         self._mcp_servers_cache = list(config.mcp_servers)  # hot-reloadable
+        self._claude_code_plugins: list[dict[str, str]] = []  # plugin dirs
 
     async def initialize(self) -> None:
         """Initialize the agent engine — set up tools and main session."""
@@ -129,6 +130,10 @@ class AgentEngine:
             skill_manager=self._skill_manager,
             engine=self,
         )
+
+        # Load Claude Code plugin directories for SDK plugins field
+        from nerve.config import load_claude_code_plugins
+        self._claude_code_plugins = load_claude_code_plugins()
 
         # Sync MCP servers to DB for frontend visibility
         await self._sync_mcp_servers_to_db()
@@ -169,12 +174,14 @@ class AgentEngine:
         New sessions will automatically use the updated config.
         Returns the list of McpServerConfig.
         """
-        from nerve.config import load_mcp_servers
+        from nerve.config import load_claude_code_plugins, load_mcp_servers
         self._mcp_servers_cache = load_mcp_servers()
+        self._claude_code_plugins = load_claude_code_plugins()
         await self._sync_mcp_servers_to_db()
         logger.info(
-            "MCP config reloaded: %d external server(s)",
+            "MCP config reloaded: %d server(s), %d Claude Code plugin(s)",
             len(self._mcp_servers_cache),
+            len(self._claude_code_plugins),
         )
         return self._mcp_servers_cache
 
@@ -615,10 +622,17 @@ class AgentEngine:
             # so we can't enumerate them upfront.
             cwd=str(self.config.workspace),
             mcp_servers=self._build_mcp_servers(session_id),
+            # Claude Code plugins — loaded via --plugin-dir so the CLI
+            # handles OAuth, credentials, and plugin lifecycle natively.
+            plugins=self._claude_code_plugins,
         )
 
     def _build_mcp_servers(self, session_id: str) -> dict[str, Any]:
-        """Build the mcp_servers dict: built-in nerve + external servers from config."""
+        """Build the mcp_servers dict: built-in nerve + external servers from config.
+
+        Claude Code plugin MCPs are handled separately via the SDK ``plugins``
+        field which lets the CLI manage OAuth and plugin lifecycle natively.
+        """
         servers: dict[str, Any] = {
             # Per-session MCP server with session_id bound in closure —
             # ensures notify/ask_user always reference the correct session.
@@ -935,6 +949,18 @@ class AgentEngine:
                                 # Sub-agent already popped above, but for
                                 # regular MCP tools we don't track start time
                                 pass
+                            # Auto-register unknown MCP servers on first use
+                            # (e.g. Claude Code plugins: "plugin_Notion_notion").
+                            # Skip servers already registered at startup to avoid
+                            # overwriting their type (nerve=sdk, grafana=stdio).
+                            known = {"nerve"} | {
+                                s.name for s in self._mcp_servers_cache
+                            }
+                            if srv_name not in known:
+                                await self.db.upsert_mcp_server(
+                                    name=srv_name, server_type="plugin",
+                                    enabled=True,
+                                )
                             await self.db.record_mcp_tool_usage(
                                 server_name=srv_name,
                                 tool_name=mcp_tool,
