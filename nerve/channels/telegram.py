@@ -37,11 +37,13 @@ EDIT_INTERVAL = 1.5
 # Polling watchdog settings
 WATCHDOG_INTERVAL = 30  # seconds between health checks
 WATCHDOG_HEARTBEAT_INTERVAL = 10  # log heartbeat every N checks (~5 min)
-STALE_THRESHOLD = 600  # seconds without any update before active probe
+STALE_THRESHOLD = 300  # seconds without any update before active probe
+FORCE_RESTART_THRESHOLD = 900  # seconds stale → force restart regardless of probe
 MAX_RESTART_ATTEMPTS = 10  # consecutive failures before entering cooldown
 RESTART_BACKOFF_BASE = 5  # seconds, doubles each attempt, capped at 300s
 COOLDOWN_INTERVAL = 300  # seconds to wait after exhausting restart attempts
 PROBE_TIMEOUT = 10  # seconds for bot.get_me() active health check
+RESTART_STOP_TIMEOUT = 15  # seconds to wait for updater.stop() before giving up
 
 
 class TelegramChannel(BaseChannel):
@@ -146,14 +148,17 @@ class TelegramChannel(BaseChannel):
     async def _run_watchdog(self) -> None:
         """Monitor polling health and auto-restart if it dies.
 
-        Three layers of health checking:
-        1. Task alive? — is the internal polling asyncio task still running
-        2. Updater flag — does PTB think it's polling
-        3. Active probe — can we actually reach Telegram's API (bot.get_me)
+        Four layers of health checking:
+        1. Updater flag — does PTB think it's polling?
+        2. Task alive — is the internal polling asyncio task still running?
+        3. Stale + probe — no handler called in 5 min? Probe with get_me().
+           If probe fails → restart. If probe works → maybe just quiet.
+        4. Force restart — stale for 15 min regardless of probe results.
+           Catches hung connections where the task is alive but stuck.
 
-        The active probe fires when we haven't received any update in
-        STALE_THRESHOLD seconds, catching cases where the task is alive
-        but the connection is silently hung.
+        On restart: tries clean updater.stop() with a 15s timeout.
+        If stop() hangs (stuck connection), rebuilds the entire PTB
+        Application from scratch.
 
         Never gives up permanently — after exhausting rapid restart
         attempts, enters a cooldown period and then tries again.
@@ -249,8 +254,13 @@ class TelegramChannel(BaseChannel):
 
         Layer 1: Is the updater flag set?
         Layer 2: Is the internal polling task still running?
-        Layer 3: If stale (no updates for STALE_THRESHOLD), actively
-                 probe the API with bot.get_me() to detect hung connections.
+        Layer 3: Staleness — no handler called for STALE_THRESHOLD?
+                 Probe API with get_me() to distinguish "no messages"
+                 from "connection hung." But get_me() uses a new connection,
+                 so it can succeed even with a hung polling connection.
+        Layer 4: Force restart after FORCE_RESTART_THRESHOLD regardless —
+                 if we've been stale that long, something is wrong even
+                 if get_me() works.
         """
         if not self._app or not self._app.updater:
             return False
@@ -274,54 +284,79 @@ class TelegramChannel(BaseChannel):
             )
             return False
 
-        # Layer 3: if no updates received recently, probe the API
+        # Layer 3 & 4: staleness checks
         now = time.monotonic()
-        if self._last_update_time > 0:
-            stale_seconds = now - self._last_update_time
-        else:
-            # Never received an update — use time since start
-            stale_seconds = now - self._last_update_time if self._last_update_time else STALE_THRESHOLD + 1
+        stale_seconds = now - self._last_update_time if self._last_update_time > 0 else now
 
-        if stale_seconds > STALE_THRESHOLD:
-            logger.info(
-                "Telegram watchdog: no updates for %.0fs, running active probe",
-                stale_seconds,
+        if stale_seconds <= STALE_THRESHOLD:
+            return True  # fresh enough, definitely healthy
+
+        # Layer 4: been stale way too long → force restart, don't even probe
+        if stale_seconds > FORCE_RESTART_THRESHOLD:
+            logger.warning(
+                "Telegram watchdog: no updates for %.0fs (> %ds) — "
+                "forcing restart (connection likely hung)",
+                stale_seconds, FORCE_RESTART_THRESHOLD,
             )
-            try:
-                me = await asyncio.wait_for(
-                    self._app.bot.get_me(), timeout=PROBE_TIMEOUT,
+            return False
+
+        # Layer 3: stale but not critically — probe API to check
+        logger.info(
+            "Telegram watchdog: no updates for %.0fs, running active probe",
+            stale_seconds,
+        )
+        try:
+            me = await asyncio.wait_for(
+                self._app.bot.get_me(), timeout=PROBE_TIMEOUT,
+            )
+            if me:
+                # API reachable on a fresh connection. Polling *might* be fine
+                # (just no messages), or the polling connection might be hung
+                # while the API itself works. We give it the benefit of the
+                # doubt here — Layer 4 catches it if staleness continues.
+                logger.info(
+                    "Telegram watchdog: active probe OK (bot: @%s), "
+                    "will force-restart at %ds stale",
+                    me.username, FORCE_RESTART_THRESHOLD,
                 )
-                if me:
-                    # API is reachable — polling task might just have no messages
-                    # That's fine, reset the timer to avoid spamming probes
-                    logger.info(
-                        "Telegram watchdog: active probe OK (bot: @%s)",
-                        me.username,
-                    )
-                    self._last_update_time = now
-                    return True
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Telegram watchdog: active probe timed out after %ds",
-                    PROBE_TIMEOUT,
-                )
-                return False
-            except Exception as e:
-                logger.warning(
-                    "Telegram watchdog: active probe failed: %s", e,
-                )
-                return False
+                return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Telegram watchdog: active probe timed out after %ds — "
+                "API unreachable",
+                PROBE_TIMEOUT,
+            )
+            return False
+        except Exception as e:
+            logger.warning(
+                "Telegram watchdog: active probe failed: %s", e,
+            )
+            return False
 
         return True
 
     async def _restart_polling(self) -> None:
-        """Stop the updater cleanly, then start a fresh polling loop."""
+        """Stop the updater cleanly, then start a fresh polling loop.
+
+        If the clean stop hangs (e.g. stuck connection), we time out and
+        rebuild the entire Application from scratch as a last resort.
+        """
         if self._app is None:
             return
 
-        # stop() sets _running=False and cancels the dead task
+        # Try a clean stop with a timeout — stop() can hang if the
+        # polling connection is stuck at the TCP level
         try:
-            await self._app.updater.stop()
+            await asyncio.wait_for(
+                self._app.updater.stop(), timeout=RESTART_STOP_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Telegram updater.stop() hung for %ds — rebuilding Application",
+                RESTART_STOP_TIMEOUT,
+            )
+            await self._rebuild_application()
+            return
         except Exception as e:
             logger.debug("Updater stop during restart: %s", e)
 
@@ -329,6 +364,45 @@ class TelegramChannel(BaseChannel):
 
         # Don't drop pending updates on restart — we might have missed some
         await self._app.updater.start_polling(drop_pending_updates=False)
+
+    async def _rebuild_application(self) -> None:
+        """Nuclear option: tear down and rebuild the entire PTB Application.
+
+        Used when updater.stop() hangs and we can't cleanly restart polling.
+        """
+        old_app = self._app
+
+        # Build a fresh Application with the same config
+        self._app = (
+            Application.builder()
+            .token(self.config.telegram.bot_token)
+            .build()
+        )
+
+        # Re-register all handlers
+        self._app.add_handler(CommandHandler("start", self._handle_start))
+        self._app.add_handler(CommandHandler("session", self._handle_session))
+        self._app.add_handler(CommandHandler("sessions", self._handle_sessions))
+        self._app.add_handler(CommandHandler("new", self._handle_new_session))
+        self._app.add_handler(CommandHandler("reply", self._handle_reply))
+        self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
+        self._app.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message),
+        )
+        self._app.add_error_handler(self._handle_error)
+
+        await self._app.initialize()
+        await self._app.start()
+        await self._app.updater.start_polling(drop_pending_updates=False)
+
+        logger.info("Telegram Application rebuilt from scratch")
+
+        # Best-effort cleanup of the old app (don't await — it might hang)
+        if old_app:
+            try:
+                await asyncio.wait_for(old_app.shutdown(), timeout=5)
+            except Exception:
+                logger.debug("Old Application cleanup failed (expected)")
 
     # ------------------------------------------------------------------ #
     #  Outbound: send complete message                                     #
