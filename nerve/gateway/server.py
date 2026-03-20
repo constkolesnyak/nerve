@@ -187,16 +187,19 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Shutdown: stop telegram FIRST, before cancelling background tasks.
+    # Background task cancellation propagates through anyio cancel scopes
+    # (Starlette runs the lifespan in an anyio context), which can kill
+    # the telegram polling task before we get a chance to stop it cleanly.
+    if telegram_channel:
+        await telegram_channel.stop()
+    if cron_task:
+        await cron_task.stop()
+
     notify_expiry_task.cancel()
     idle_sweep_task.cancel()
     memorize_task.cancel()
     cleanup_task.cancel()
-
-    # Shutdown
-    if cron_task:
-        await cron_task.stop()
-    if telegram_channel:
-        await telegram_channel.stop()
     await _engine.shutdown()
     await close_db()
     if proxy_service:
