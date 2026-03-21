@@ -160,6 +160,9 @@ class TelegramChannel(BaseChannel):
         builder = (
             Application.builder()
             .token(self.config.telegram.bot_token)
+            # Process updates concurrently so /stop can interrupt a running
+            # message handler instead of being queued behind it.
+            .concurrent_updates(True)
             # TCP keepalive on the polling connection — prevents NAT/firewall
             # from silently dropping the long-poll connection
             .get_updates_socket_options(_TCP_KEEPALIVE_OPTS)
@@ -177,6 +180,7 @@ class TelegramChannel(BaseChannel):
         app.add_handler(CommandHandler("session", self._handle_session))
         app.add_handler(CommandHandler("sessions", self._handle_sessions))
         app.add_handler(CommandHandler("new", self._handle_new_session))
+        app.add_handler(CommandHandler("stop", self._handle_stop))
         app.add_handler(CommandHandler("reply", self._handle_reply))
         app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         app.add_handler(MessageHandler(
@@ -539,6 +543,28 @@ class TelegramChannel(BaseChannel):
             f"New session: `{session_id}`" + (f" — {title}" if title else ""),
             parse_mode=ParseMode.MARKDOWN,
         )
+
+    async def _handle_stop(self, update: Update, context: Any) -> None:
+        """Handle /stop — stop the currently running session."""
+        self._touch()
+        if not self._is_authorized(update.effective_user.id):
+            return
+        chat_id = update.effective_chat.id
+        channel_key = f"telegram:{chat_id}"
+
+        session_id = await self.router.get_last_session(channel_key)
+        if not session_id:
+            await update.message.reply_text("No active session.")
+            return
+
+        stopped = await self.router.engine.stop_session(session_id)
+        if stopped:
+            await update.message.reply_text(
+                f"Stopped session `{session_id}`.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await update.message.reply_text("Nothing running to stop.")
 
     # ------------------------------------------------------------------ #
     #  Message handler — construct InboundMessage and delegate             #
