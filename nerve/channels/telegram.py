@@ -529,15 +529,21 @@ class TelegramChannel(BaseChannel):
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
     async def _handle_new_session(self, update: Update, context: Any) -> None:
-        """Handle /new [title] — create and switch to a new session."""
+        """Handle /new [title] — stop current session, create and switch to a new one."""
         self._touch()
         if not self._is_authorized(update.effective_user.id):
             return
         chat_id = update.effective_chat.id
+        channel_key = f"telegram:{chat_id}"
+
+        # Stop the current session before creating a new one
+        prev = await self.router.get_last_session(channel_key)
+        if prev:
+            await self.router.engine.stop_session(prev)
 
         title = " ".join(context.args) if context.args else None
         session_id = await self.router.create_session(
-            f"telegram:{chat_id}", title=title, source="telegram",
+            channel_key, title=title, source="telegram",
         )
         await update.message.reply_text(
             f"New session: `{session_id}`" + (f" — {title}" if title else ""),
