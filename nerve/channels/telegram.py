@@ -419,7 +419,8 @@ class TelegramChannel(BaseChannel):
                 text=html_text,
                 parse_mode=ParseMode.HTML,
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning("edit_message HTML failed: %s", exc)
             # Fallback: send without formatting if HTML parsing fails
             try:
                 await self._app.bot.edit_message_text(
