@@ -1137,6 +1137,15 @@ class AgentEngine:
                 await client.query(user_message)
 
             async for message in client.receive_response():
+                # Early-capture sdk_session_id from first message that
+                # carries it so it survives /stop cancellation (ResultMessage
+                # — the normal source — never arrives when the turn is
+                # interrupted).
+                if not sdk_session_id:
+                    msg_sid = getattr(message, "session_id", None)
+                    if msg_sid:
+                        sdk_session_id = msg_sid
+
                 if isinstance(message, AssistantMessage):
                     # Extract parent_tool_use_id — set when this message
                     # comes from a sub-agent (Task) rather than the main agent
@@ -1246,8 +1255,13 @@ class AgentEngine:
             })
             # Memorize before discarding client
             await self._memorize_session(session_id)
-            # mark_stopped only sets status — sdk_session_id (if any)
-            # stays in the DB from when the client was created/resumed.
+            # Persist sdk_session_id so the session can be resumed later.
+            # For new sessions the DB still has NULL because mark_active()
+            # was called before the SDK emitted any messages.
+            if sdk_session_id:
+                await self.db.update_session_fields(
+                    session_id, {"sdk_session_id": sdk_session_id},
+                )
             await self.sessions.mark_stopped(session_id)
             unregister_handler(session_id)
             client = self.sessions.remove_client(session_id)
