@@ -166,22 +166,63 @@ Markdown + SQLite task system:
 4. Agent uses `notify`/`ask_user` tools to communicate with user
 5. Run logged in `cron_logs` table
 
-## Database Schema
+## Database
 
-SQLite with WAL mode (schema version 14):
+### Package Structure
+
+The database layer lives in `nerve/db/` as a Python package with domain-specific modules:
+
+```
+nerve/db/
+├── __init__.py        # Re-exports Database, init_db, close_db, SCHEMA_VERSION
+├── base.py            # Database class (connection, _atomic, FTS check)
+├── migrations/        # File-based migration system
+│   ├── runner.py      # Discovers and applies vNNN_*.py files in order
+│   ├── v001_initial.py
+│   ├── ...
+│   └── v016_mcp_servers.py
+├── sessions.py        # SessionStore mixin
+├── messages.py        # MessageStore mixin
+├── tasks.py           # TaskStore mixin
+├── plans.py           # PlanStore mixin
+├── notifications.py   # NotificationStore mixin
+├── sources.py         # SourceStore mixin (inbox, sync cursors, consumer cursors)
+├── cron.py            # CronStore mixin
+├── skills.py          # SkillStore mixin
+├── mcp.py             # McpStore mixin
+└── audit.py           # AuditStore mixin
+```
+
+The `Database` class in `base.py` inherits all domain mixins, preserving a single `Database` interface. All existing imports (`from nerve.db import Database`) work unchanged via `__init__.py` re-exports.
+
+### Migrations
+
+Migrations are individual Python files in `nerve/db/migrations/` named `vNNN_description.py`. Each exports an `async def up(db)` function. The runner discovers them by scanning the directory, applies pending ones in version order, and wraps each in a transaction. `SCHEMA_VERSION` is derived dynamically from the highest migration file number.
+
+To add a new migration: create `nerve/db/migrations/v017_your_feature.py` with an `up()` function.
+
+### Schema
+
+SQLite with WAL mode (schema version 16):
 - `sessions` — Session metadata with lifecycle columns (`status`, `sdk_session_id`, `connected_at`, `parent_session_id`, `forked_from_message`, `last_activity_at`, `archived_at`, `message_count`, `total_cost_usd`)
 - `messages` — Conversation messages with tool call data and ordered `blocks` JSON column (preserves interleaving of text/thinking/tool_call blocks across page reloads)
 - `session_events` — Append-only lifecycle audit log (created, started, idle, stopped, archived, error)
 - `channel_sessions` — Persistent channel-to-session mapping (survives restarts)
 - `session_file_snapshots` — Pre-modification file content captured via `PreToolUse` hook for session-scoped diff computation. Keyed by `(session_id, file_path)`, first-touch only. Cleaned up on session delete.
 - `tasks` — Task index (mirrors markdown files)
+- `tasks_fts` — FTS5 full-text search index for tasks
 - `sync_cursors` — Opaque cursor positions per source
 - `source_run_log` — Per-source run diagnostics (records fetched/processed, errors)
+- `source_messages` — Source inbox with TTL-based expiry
+- `consumer_cursors` — Kafka-like consumer positions per source
 - `cron_logs` — Job execution history (includes source runs as `source:<name>`)
 - `memu_audit_log` — memU operation audit trail
+- `plans` — Plans proposed by planner agent for async human review
 - `skills` — Skill registry (id, name, description, version, enabled, metadata)
 - `skill_usage` — Skill invocation tracking (skill_id, session_id, invoked_by, duration, success/error)
 - `notifications` — Async notifications and questions (id, session_id, type, title, body, priority, status, options, answer, delivery tracking, expiry)
+- `mcp_servers` — MCP server registry (config is source of truth, DB tracks metadata)
+- `mcp_tool_usage` — MCP tool invocation tracking
 
 memU SQLite (`~/.nerve/memu.sqlite`):
 - `memu_resources` — Indexed source files/conversations
@@ -192,7 +233,7 @@ memU SQLite (`~/.nerve/memu.sqlite`):
 ## Startup Sequence
 
 1. Load config (`config.yaml` + `config.local.yaml` deep merge)
-2. Run database migrations (auto-migrate SQLite schema)
+2. Run database migrations (file-based migration system in `nerve/db/migrations/`)
 3. Initialize memory system (memU SQLite, load categories)
 4. Start CLIProxyAPI proxy if enabled (download binary if missing, authenticate, start subprocess)
 5. Recover orphan sessions (active in DB but no live client → idle or stopped)
