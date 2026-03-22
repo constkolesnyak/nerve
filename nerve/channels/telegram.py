@@ -104,6 +104,48 @@ def _md_to_tg_html(text: str) -> str:
     return text
 
 
+def _format_reply_context(message: Any) -> str:
+    """Extract reply-to context and quote from a Telegram message.
+
+    Returns a prefix string like:
+        [Reply to assistant: "original text here"]
+        [Quoted: "selected portion"]
+
+    Returns empty string if the message is not a reply.
+    """
+    reply = getattr(message, "reply_to_message", None)
+    if not reply:
+        return ""
+
+    parts: list[str] = []
+
+    # Determine sender label
+    from_user = getattr(reply, "from_user", None)
+    if from_user and getattr(from_user, "is_bot", False):
+        sender = "assistant"
+    elif from_user:
+        sender = getattr(from_user, "first_name", None) or "user"
+    else:
+        sender = "user"
+
+    # Original message text
+    original = getattr(reply, "text", None) or getattr(reply, "caption", None) or ""
+    if original:
+        display = original if len(original) <= 500 else original[:500] + "…"
+        parts.append(f'[Reply to {sender}: "{display}"]')
+    else:
+        parts.append(f"[Reply to {sender}'s message]")
+
+    # Quote (manually selected text)
+    quote = getattr(message, "quote", None)
+    if quote:
+        quote_text = getattr(quote, "text", None)
+        if quote_text:
+            parts.append(f'[Quoted: "{quote_text}"]')
+
+    return "\n".join(parts)
+
+
 class TelegramChannel(BaseChannel):
     """Telegram bot channel.
 
@@ -609,6 +651,11 @@ class TelegramChannel(BaseChannel):
         chat_id = update.effective_chat.id
         text = update.message.text or update.message.caption or ""
 
+        # Prepend reply-to context and quote (if replying to a message)
+        reply_context = _format_reply_context(update.message)
+        if reply_context:
+            text = f"{reply_context}\n\n{text}" if text else reply_context
+
         # Extract image if present
         images: list[dict[str, str]] = []
         image = await self._extract_image(update.message)
@@ -679,6 +726,11 @@ class TelegramChannel(BaseChannel):
             if caption:
                 text = caption
                 break
+
+        # Prepend reply-to context (album reply info is on the first message)
+        reply_context = _format_reply_context(updates[0].message)
+        if reply_context:
+            text = f"{reply_context}\n\n{text}" if text else reply_context
 
         # Download all images
         images: list[dict[str, str]] = []
