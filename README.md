@@ -20,6 +20,46 @@ Nerve is a self-hosted runtime for AI agents, built around the [Claude Agent SDK
 
 Ship a **personal assistant** that develops a personality, remembers your preferences, and manages your inbox. Or deploy a **worker agent** that monitors your CI, reviews PRs, and fixes flaky tests — all plan-driven with human approval. Same engine, different mission.
 
+## Quick Start
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pufit/nerve/main/install.sh | bash
+```
+
+The installer handles everything — installs dependencies (Python, Node.js, uv), clones the repo, builds the web UI, and launches the interactive setup wizard.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NERVE_INSTALL_DIR` | `~/nerve` | Where to clone the repo |
+| `NERVE_BRANCH` | `main` | Git branch to install |
+| `NERVE_YES` | `1` | Set to `1` to skip confirmation prompts |
+
+<details>
+<summary><strong>Manual install</strong></summary>
+
+**Prerequisites:** [Git](https://git-scm.com/), [Python 3.13+](https://www.python.org/), [uv](https://docs.astral.sh/uv/), [Node.js 18+](https://nodejs.org/)
+
+```bash
+git clone https://github.com/pufit/nerve.git && cd nerve
+uv venv --python 3.13 && source .venv/bin/activate
+uv pip install -e .
+cd web && npm ci && npm run build && cd ..
+nerve init
+nerve start -f
+```
+</details>
+
+**No API key?** Use your Claude subscription instead:
+```bash
+NERVE_USE_PROXY=1 nerve init --non-interactive
+```
+
+**Docker:**
+```bash
+nerve init           # Generates Dockerfile + docker-compose.yml
+nerve start          # All CLI commands proxy to docker compose
+```
+
 ## Two Modes
 
 ### 🧑 Personal Mode
@@ -212,46 +252,6 @@ nerve (single Python process)
 ├── Plans — SQLite with approval workflow
 ├── Notifications — Multi-channel delivery
 └── Proxy (optional) — Claude OAuth, no API key needed
-```
-
-## Quick Start
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/pufit/nerve/main/install.sh | bash
-```
-
-The installer handles everything — installs dependencies (Python, Node.js, uv), clones the repo, builds the web UI, and launches the interactive setup wizard.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NERVE_INSTALL_DIR` | `~/nerve` | Where to clone the repo |
-| `NERVE_BRANCH` | `main` | Git branch to install |
-| `NERVE_YES` | `1` | Set to `1` to skip confirmation prompts |
-
-<details>
-<summary><strong>Manual install</strong></summary>
-
-**Prerequisites:** [Git](https://git-scm.com/), [Python 3.13+](https://www.python.org/), [uv](https://docs.astral.sh/uv/), [Node.js 18+](https://nodejs.org/)
-
-```bash
-git clone https://github.com/pufit/nerve.git && cd nerve
-uv venv --python 3.13 && source .venv/bin/activate
-uv pip install -e .
-cd web && npm ci && npm run build && cd ..
-nerve init
-nerve start -f
-```
-</details>
-
-**No API key?** Use your Claude subscription instead:
-```bash
-NERVE_USE_PROXY=1 nerve init --non-interactive
-```
-
-**Docker:**
-```bash
-nerve init           # Generates Dockerfile + docker-compose.yml
-nerve start          # All CLI commands proxy to docker compose
 ```
 
 ## Configuration
