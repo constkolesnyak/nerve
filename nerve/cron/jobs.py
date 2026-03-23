@@ -28,6 +28,8 @@ class CronJob:
     reminder_mode: bool = False  # Persistent only: send short reminder instead of full prompt on subsequent runs
     catchup: bool = True  # Fire once on startup if missed while server was down
     enabled: bool = True
+    skip_when_idle: list[str] = field(default_factory=list)  # Source names to check; skip run if no new messages
+    idle_consumer: str = "inbox"  # Consumer cursor name for the idle check
     metadata: dict = field(default_factory=dict)
 
     @classmethod
@@ -43,6 +45,8 @@ class CronJob:
             reminder_mode=bool(d.get("reminder_mode", False)),
             catchup=d.get("catchup", True),
             enabled=d.get("enabled", True),
+            skip_when_idle=d.get("skip_when_idle", []),
+            idle_consumer=d.get("idle_consumer", "inbox"),
             metadata=d.get("metadata", {}),
         )
 
@@ -91,6 +95,8 @@ def save_jobs(jobs: list[CronJob], jobs_file: Path) -> None:
             "reminder_mode": job.reminder_mode,
             "catchup": job.catchup,
             "enabled": job.enabled,
+            "skip_when_idle": job.skip_when_idle,
+            "idle_consumer": job.idle_consumer,
             "metadata": job.metadata,
         })
 

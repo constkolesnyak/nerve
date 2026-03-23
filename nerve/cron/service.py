@@ -302,8 +302,35 @@ class CronService:
 
         return list(jobs_by_id.values())
 
+    async def _has_pending_messages(
+        self, consumer: str, sources: list[str],
+    ) -> bool:
+        """Check if any of the listed sources have unread messages.
+
+        Uses existing consumer cursor position vs source max rowid.
+        Does not advance any cursors.
+        """
+        for source in sources:
+            cursor_seq = await self.db.get_consumer_cursor(consumer, source)
+            max_seq = await self.db.get_source_max_rowid(source)
+            if max_seq > cursor_seq:
+                return True
+        return False
+
     async def _run_job_wrapper(self, job: CronJob) -> None:
         """Wrapper to run a cron job with logging."""
+        # Pre-check: skip if no new messages in monitored sources
+        if job.skip_when_idle:
+            has_pending = await self._has_pending_messages(
+                job.idle_consumer, job.skip_when_idle,
+            )
+            if not has_pending:
+                logger.info(
+                    "Skipping cron job %s: no new messages in %s",
+                    job.id, job.skip_when_idle,
+                )
+                return
+
         log_id = await self.db.log_cron_start(job.id)
         logger.info("Running cron job: %s (mode=%s)", job.id, job.session_mode)
 

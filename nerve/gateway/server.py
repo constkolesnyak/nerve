@@ -189,12 +189,14 @@ async def lifespan(app: FastAPI):
 
     logger.info("Nerve started on %s:%d", config.gateway.host, config.gateway.port)
 
-    # Send startup notification to the user
+    # Send startup notification to the user (Telegram only, silent)
     try:
         await notification_service.send_notification(
             session_id="system",
             title=f"Nerve started (pid {os.getpid()})",
             priority="low",
+            channels=["telegram"],
+            silent=True,
         )
     except Exception as e:
         logger.error("Failed to send startup notification: %s", e)
