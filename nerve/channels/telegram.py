@@ -236,7 +236,7 @@ class TelegramChannel(BaseChannel):
         app.add_handler(CommandHandler("reply", self._handle_reply))
         app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         app.add_handler(MessageHandler(
-            (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
+            filters.TEXT | filters.PHOTO | filters.COMMAND,
             self._handle_message,
         ))
         app.add_handler(MessageReactionHandler(self._handle_reaction))

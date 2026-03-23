@@ -1124,11 +1124,19 @@ class AgentEngine:
                 return ""
 
             # Send message — the client preserves conversation history internally
+            # Escape slash-prefixed messages so Claude Code CLI doesn't
+            # intercept them as built-in slash commands.  Registered bot
+            # commands (/stop, /new, etc.) are handled upstream — anything
+            # that reaches here should go straight to the LLM.
+            query_text = user_message
+            if query_text and query_text.startswith("/"):
+                query_text = "\u200b" + query_text
+
             if images:
                 # Build multi-modal content blocks (text + images)
                 content_blocks: list[dict[str, Any]] = []
-                if user_message:
-                    content_blocks.append({"type": "text", "text": user_message})
+                if query_text:
+                    content_blocks.append({"type": "text", "text": query_text})
                 for img in images:
                     content_blocks.append({
                         "type": "image",
@@ -1148,7 +1156,7 @@ class AgentEngine:
 
                 await client.query(_image_prompt())
             else:
-                await client.query(user_message)
+                await client.query(query_text)
 
             async for message in client.receive_response():
                 # Early-capture sdk_session_id from first message that
