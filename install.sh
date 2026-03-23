@@ -43,7 +43,7 @@ step()    { printf "\n${BOLD}${CYAN}==> %s${NC}\n" "$1"; }
 confirm() {
     if [ "$AUTO_YES" = "1" ]; then return 0; fi
     printf "${BOLD}  %s [Y/n]${NC} " "$1"
-    read -r response
+    read -r response < /dev/tty
     case "$response" in
         [nN]|[nN][oO]) return 1 ;;
         *) return 0 ;;
@@ -457,7 +457,9 @@ run_init() {
     fi
 
     cd "$INSTALL_DIR"
-    "$nerve_bin" init
+    # Redirect stdin from /dev/tty so the interactive wizard works
+    # even when the installer is piped via curl | bash
+    "$nerve_bin" init < /dev/tty
 }
 
 # --- Summary ---
@@ -550,7 +552,14 @@ main() {
 
     setup_repo
     setup_python_env
-    build_web_ui
+
+    # On upgrade, rebuild web UI since nerve init is skipped.
+    # On fresh install, nerve init handles the build (server mode)
+    # or Docker handles it (docker mode).
+    if [ "$IS_UPGRADE" = "1" ]; then
+        build_web_ui
+    fi
+
     setup_path
     run_init
     print_summary
