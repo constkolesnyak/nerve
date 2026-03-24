@@ -194,8 +194,10 @@ class HoAService:
 
         agents: list[str] = []
 
-        # Anthropic agent
+        # Anthropic agent — grant workspace access via --add-dir
         anthropic_key = self.config.anthropic_api_key
+        workspace_dir = str(self.config.workspace.expanduser())
+        extra_args = f'--add-dir {workspace_dir}' if self._hoa.use_cli else ''
         agents.append(
             f'[[agents]]\n'
             f'name = "Claude"\n'
@@ -204,7 +206,7 @@ class HoAService:
             f'model = "claude-opus-4-6"\n'
             f'thinking_effort = "high"\n'
             f'use_cli = {str(self._hoa.use_cli).lower()}\n'
-            f'extra_cli_args = ""\n'
+            f'extra_cli_args = "{extra_args}"\n'
         )
 
         # OpenAI agent (if key available)
