@@ -20,6 +20,31 @@ Nerve is a self-hosted runtime for AI agents, built around the [Claude Agent SDK
 
 Ship a **personal assistant** that develops a personality, remembers your preferences, and manages your inbox. Or deploy a **worker agent** that monitors your CI, reviews PRs, and fixes flaky tests — all plan-driven with human approval. Same engine, different mission.
 
+## Quick Start
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pufit/nerve/main/install.sh | bash
+```
+
+The installer handles everything — installs dependencies (Python, Node.js, uv), clones the repo, builds the web UI, and launches the interactive setup wizard.
+
+<details>
+<summary><strong>Manual install</strong></summary>
+
+**Prerequisites:** [Git](https://git-scm.com/), [Python 3.13+](https://www.python.org/), [uv](https://docs.astral.sh/uv/), [Node.js 18+](https://nodejs.org/)
+
+```bash
+git clone https://github.com/pufit/nerve.git && cd nerve
+uv venv --python 3.13 && source .venv/bin/activate
+uv pip install -e .
+cd web && npm ci && npm run build && cd ..
+nerve init
+nerve start -f
+```
+</details>
+
+**No API key?** Use your Claude subscription instead
+
 ## Two Modes
 
 ### 🧑 Personal Mode
@@ -214,37 +239,6 @@ nerve (single Python process)
 └── Proxy (optional) — Claude OAuth, no API key needed
 ```
 
-## Quick Start
-
-```bash
-# Install
-git clone https://github.com/pufitdev/nerve.git
-cd nerve
-uv venv && source .venv/bin/activate
-uv pip install -e .
-
-# Interactive setup — creates config, workspace, and cron jobs
-nerve init                    # Personal mode (default)
-nerve init --mode worker      # Worker mode
-
-# Start
-nerve start -f
-
-# Verify
-nerve doctor
-```
-
-**No API key?** Use your Claude subscription instead:
-```bash
-NERVE_USE_PROXY=1 nerve init --non-interactive
-```
-
-**Docker:**
-```bash
-nerve init           # Generates Dockerfile + docker-compose.yml
-nerve start          # All CLI commands proxy to docker compose
-```
-
 ## Configuration
 
 Two config files:
@@ -255,11 +249,12 @@ See [docs/config.md](docs/config.md) for all options.
 
 ## Requirements
 
-- Python 3.12+
-- Node.js 18+ (for web UI build)
-- Claude Code CLI (bundled with `claude-agent-sdk`)
+- [Python](https://www.python.org/) 3.13+
+- [uv](https://docs.astral.sh/uv/) (recommended package manager)
+- [Node.js](https://nodejs.org/) 18+ (for web UI build)
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) (bundled with `claude-agent-sdk`)
 - Anthropic API key **or** Claude subscription via [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) proxy
-- Optional: OpenAI API key (for memU embeddings), Telegram bot token, `gog` CLI, `gh` CLI
+- Optional: OpenAI API key (for memU embeddings), Telegram bot token, [gog](https://github.com/googleworkspace/cli) CLI, [gh](https://cli.github.com/) CLI
 
 ## Documentation
 

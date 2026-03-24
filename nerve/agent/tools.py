@@ -1818,7 +1818,7 @@ async def mcp_reload(args: dict) -> dict:
 _NOTIFY_SCHEMA = {
     "type": "object",
     "properties": {
-        "title": {"type": "string", "description": "Short notification title (shown as heading)", "default": ""},
+        "title": {"type": "string", "description": "Optional short heading. Omit or leave empty for regular notifications.", "default": ""},
         "body": {"type": "string", "description": "Notification body with details (markdown supported)"},
         "priority": {"type": "string", "description": "Priority level: 'low', 'normal', 'high', 'urgent'. Default: 'normal'", "default": "normal"},
     },
@@ -1906,11 +1906,102 @@ async def ask_user_tool(args: dict) -> dict:
     return await _ask_user_impl(args, _current_session_id)
 
 
+# ---------------------------------------------------------------------------
+# houseofagents tools (module-level — don't need session_id)
+# ---------------------------------------------------------------------------
+
+def _hoa_text(text: str) -> dict:
+    """Shorthand for MCP tool text response."""
+    return {"content": [{"type": "text", "text": text}]}
+
+
+def _format_hoa_event_log(events: list[dict]) -> str:
+    """Format HoA progress events into a readable log for the tool result."""
+    if not events:
+        return ""
+    lines = ["## Execution Log"]
+    for ev in events:
+        event_type = ev.get("event", "")
+        label = ev.get("label", "")
+        agent = ev.get("agent", "")
+        message = ev.get("message", "")
+        iteration = ev.get("iteration")
+        loop_pass = ev.get("loop_pass")
+
+        if event_type == "run_info":
+            mode = ev.get("mode", "?")
+            agents = ev.get("agents", [])
+            lines.append(f"- **Run started** — mode: {mode}, agents: {', '.join(agents) if agents else 'from pipeline'}")
+        elif event_type == "block_started":
+            suffix = f" (iter {iteration})" if iteration and iteration > 1 else ""
+            loop_suffix = f" [loop {loop_pass}]" if loop_pass and loop_pass > 0 else ""
+            lines.append(f"- **{label or 'Block'}** started{suffix}{loop_suffix} → {agent}")
+        elif event_type == "block_finished":
+            lines.append(f"- **{label or 'Block'}** finished → {agent}")
+        elif event_type == "block_skipped":
+            lines.append(f"- **{label or 'Block'}** skipped")
+        elif event_type == "iteration_complete":
+            lines.append(f"- Iteration {iteration} complete")
+        elif event_type == "all_done":
+            lines.append(f"- **All done**")
+        elif event_type == "error":
+            lines.append(f"- ❌ Error: {message}")
+        # Skip verbose block_log / run_dir events from the summary
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+@tool(
+    "hoa_status",
+    "Check houseofagents multi-agent runtime availability and version. "
+    "Returns whether houseofagents is enabled, installed, and its version.",
+    {},
+)
+async def hoa_status(args: dict) -> dict:
+    if not _config or not _config.houseofagents.enabled:
+        return {"content": [{"type": "text", "text": "houseofagents: disabled (set houseofagents.enabled: true in config.yaml)"}]}
+    from nerve.houseofagents import get_hoa_service
+    svc = get_hoa_service()
+    available = svc.is_available()
+    version = await svc.get_version() if available else None
+    status = "available" if available else "not installed (will install on first use)"
+    text = f"houseofagents: {status}"
+    if version:
+        text += f"\nVersion: {version}"
+    text += f"\nDefault mode: {_config.houseofagents.default_mode}"
+    text += f"\nDefault agents: {', '.join(_config.houseofagents.default_agents)}"
+    return _hoa_text(text)
+
+
+@tool(
+    "hoa_list_pipelines",
+    "List available houseofagents pipeline configurations.",
+    {},
+)
+async def hoa_list_pipelines(args: dict) -> dict:
+    if not _config or not _config.houseofagents.enabled:
+        return _hoa_text("houseofagents is not enabled.")
+    from nerve.houseofagents.pipelines import PipelineManager
+    pm = PipelineManager(_config.houseofagents.pipelines_dir)
+    pipelines = pm.list_pipelines()
+    if not pipelines:
+        return _hoa_text("No pipelines configured.")
+    lines = [f"- **{p['id']}**: {p['description']}" for p in pipelines]
+    return _hoa_text("Available pipelines:\n" + "\n".join(lines))
+
+
+# Names of tools that should only be registered when houseofagents is enabled.
+_HOA_TOOL_NAMES = {"hoa_status", "hoa_list_pipelines"}
+
 # Auto-collect all @tool-decorated functions defined in this module.
-# No manual list to forget updating when adding new tools.
+# HoA module-level tools are collected separately and conditionally added.
 ALL_TOOLS: list[SdkMcpTool] = [
     obj for obj in globals().values()
-    if isinstance(obj, SdkMcpTool)
+    if isinstance(obj, SdkMcpTool) and obj.name not in _HOA_TOOL_NAMES
+]
+
+_HOA_MODULE_TOOLS: list[SdkMcpTool] = [
+    obj for obj in globals().values()
+    if isinstance(obj, SdkMcpTool) and obj.name in _HOA_TOOL_NAMES
 ]
 
 
@@ -1978,9 +2069,88 @@ def create_session_mcp_server(session_id: str):
         # session_id captured from enclosing scope — race-free
         return await _send_sticker_impl(args, session_id)
 
+    # --- houseofagents session-scoped tool (needs session_id for streaming) ---
+
+    _HOA_EXECUTE_SCHEMA = {
+        "prompt": {"type": "string", "description": "The task/prompt for the multi-agent team"},
+        "mode": {"type": "string", "description": "Execution mode: 'relay' (sequential handoff), 'swarm' (parallel rounds), or 'pipeline' (DAG)", "default": "relay"},
+        "agents": {"type": "string", "description": "Comma-separated agent names as configured in houseofagents (e.g. 'Claude,OpenAI'). Leave empty for defaults.", "default": ""},
+        "iterations": {"type": "integer", "description": "Number of iterations for relay/swarm modes", "default": 3},
+        "pipeline_id": {"type": "string", "description": "Pipeline ID to use (for pipeline mode). Use hoa_list_pipelines to see available pipelines.", "default": ""},
+    }
+
+    @tool(
+        "hoa_execute",
+        "Execute a multi-agent workflow using houseofagents. "
+        "Orchestrates multiple AI agents (Claude, OpenAI, Gemini) in relay, swarm, or pipeline mode. "
+        "Progress streams to the UI in real-time. Returns the combined result. "
+        "Use this for complex implementations that benefit from multi-agent review and iteration. "
+        "Only available when houseofagents is enabled in config.",
+        _HOA_EXECUTE_SCHEMA,
+    )
+    async def session_hoa_execute(args: dict) -> dict:
+        if not _config or not _config.houseofagents.enabled:
+            return _hoa_text(
+                "houseofagents is not enabled. "
+                "Set houseofagents.enabled: true in config.yaml to use multi-agent execution."
+            )
+        from nerve.houseofagents import get_hoa_service
+        from nerve.houseofagents.runner import HoARunner
+
+        runner = HoARunner(get_hoa_service())
+
+        agents_str = args.get("agents", "")
+        agents = [a.strip() for a in agents_str.split(",") if a.strip()] if agents_str else None
+
+        pipeline_file = None
+        pipeline_id = args.get("pipeline_id", "")
+        if pipeline_id:
+            from nerve.houseofagents.pipelines import PipelineManager
+            pm = PipelineManager(_config.houseofagents.pipelines_dir)
+            pipeline_file = pm.get_path(pipeline_id)
+            if not pipeline_file:
+                return _hoa_text(f"Pipeline '{pipeline_id}' not found. Use hoa_list_pipelines to see available pipelines.")
+
+        result = await runner.execute(
+            prompt=args["prompt"],
+            mode=args.get("mode", _config.houseofagents.default_mode),
+            agents=agents,
+            iterations=args.get("iterations", _config.houseofagents.default_iterations),
+            pipeline_file=pipeline_file,
+            session_id=session_id,   # captured from enclosing scope → enables progress streaming
+        )
+
+        # Build event log for the tool result (persists to DB, survives page reload)
+        event_log = _format_hoa_event_log(result.events)
+
+        if result.success:
+            output_parts = []
+            if result.output_dir:
+                output_parts.append(f"Output directory: {result.output_dir}")
+            if result.stdout_json:
+                output_parts.append(json.dumps(result.stdout_json, indent=2))
+            elif result.stdout_raw:
+                output_parts.append(result.stdout_raw)
+            if event_log:
+                output_parts.append(event_log)
+            return _hoa_text("\n\n".join(output_parts) if output_parts else "Completed successfully.")
+        else:
+            parts = [f"houseofagents exited with code {result.exit_code}"]
+            if event_log:
+                parts.append(event_log)
+            parts.append(f"stderr:\n{result.stderr_log[:2000]}")
+            return _hoa_text("\n\n".join(parts))
+
     # Shared tools (don't need session context) + session-scoped tools
-    _SESSION_SCOPED = {"notify", "ask_user", "react", "send_sticker"}
-    shared_tools = [t for t in ALL_TOOLS if t.name not in _SESSION_SCOPED]
-    all_tools = shared_tools + [session_notify, session_ask_user, session_react, session_send_sticker]
+    shared_tools = [t for t in ALL_TOOLS if t.name not in ("notify", "ask_user", "react", "send_sticker")]
+    session_tools: list[SdkMcpTool] = [session_notify, session_ask_user, session_react, session_send_sticker]
+
+    # Only include houseofagents tools when enabled — saves context tokens otherwise
+    hoa_enabled = _config and _config.houseofagents.enabled
+    if hoa_enabled:
+        session_tools.append(session_hoa_execute)
+        shared_tools.extend(_HOA_MODULE_TOOLS)
+
+    all_tools = shared_tools + session_tools
 
     return create_sdk_mcp_server(name="nerve", version="1.0.0", tools=all_tools)

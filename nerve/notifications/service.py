@@ -326,9 +326,12 @@ class NotificationService:
 
         # Build message text (plain text — avoids Markdown parse failures)
         priority_prefix = {"high": "\u26a0\ufe0f ", "urgent": "\U0001f6a8 "}.get(priority, "")
-        text = f"{priority_prefix}{title}"
-        if body:
-            text += f"\n\n{body}"
+        if title:
+            text = f"{priority_prefix}{title}"
+            if body:
+                text += f"\n\n{body}"
+        else:
+            text = body or ""
         text += f"\n\nSession: {session_id}"
 
         if notif_type == "question" and options:

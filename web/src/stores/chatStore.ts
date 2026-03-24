@@ -1024,6 +1024,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
 
+      case 'hoa_progress': {
+        // houseofagents NDJSON progress — update the running hoa_execute tool block
+        const hp = msg as Extract<WSMessage, { type: 'hoa_progress' }>;
+        const blocks = [...state.streamingBlocks];
+        for (let i = blocks.length - 1; i >= 0; i--) {
+          const b = blocks[i];
+          if (b.type === 'tool_call' && b.tool.includes('hoa_execute') && b.status === 'running') {
+            // Immutable append — new array reference so React detects the change
+            const prev = b.hoaEvents || [];
+            blocks[i] = { ...b, hoaEvents: [...prev, hp.event] };
+            set({ streamingBlocks: blocks });
+            break;
+          }
+        }
+        break;
+      }
+
       case 'file_changed': {
         const fc = msg as Extract<WSMessage, { type: 'file_changed' }>;
         set(s => {
@@ -1168,6 +1185,17 @@ function applyStreamEvent(blocks: MessageBlock[], event: WSMessage): MessageBloc
         const b = result[i];
         if (b.type === 'tool_call' && b.toolUseId === event.tool_use_id) {
           result[i] = { ...b, result: event.result, isError: event.is_error, status: 'complete' as const };
+          break;
+        }
+      }
+      break;
+    }
+    case 'hoa_progress': {
+      for (let i = result.length - 1; i >= 0; i--) {
+        const b = result[i];
+        if (b.type === 'tool_call' && b.tool.includes('hoa_execute')) {
+          const prev = b.hoaEvents || [];
+          result[i] = { ...b, hoaEvents: [...prev, (event as any).event] };
           break;
         }
       }
