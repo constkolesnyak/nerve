@@ -325,7 +325,7 @@ class NotificationService:
             return None
 
         # Build message text
-        priority_prefix = {"high": "\u26a0\ufe0f ", "urgent": "\U0001f6a8 "}.get(priority, "")
+        priority_prefix = self.config.notifications.priority_prefixes.get(priority, "")
         if title:
             text = f"{priority_prefix}{title}"
             if body:
