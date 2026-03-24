@@ -324,7 +324,7 @@ class NotificationService:
         if not chat_id:
             return None
 
-        # Build message text (plain text — avoids Markdown parse failures)
+        # Build message text
         priority_prefix = {"high": "\u26a0\ufe0f ", "urgent": "\U0001f6a8 "}.get(priority, "")
         if title:
             text = f"{priority_prefix}{title}"
@@ -339,11 +339,36 @@ class NotificationService:
                 chat_id, notification_id, text, options, silent=silent,
             )
         else:
-            msg = await bot.send_message(
-                chat_id=chat_id, text=text,
+            msg = await self._send_telegram_html(bot, chat_id, text, silent=silent)
+            return str(msg.message_id)
+
+    @staticmethod
+    async def _send_telegram_html(
+        bot: object,
+        chat_id: int,
+        text: str,
+        *,
+        reply_markup: object | None = None,
+        silent: bool = False,
+    ) -> object:
+        """Send a message with markdown→HTML conversion and plain-text fallback."""
+        from nerve.channels.telegram import _md_to_tg_html
+        from telegram.constants import ParseMode
+
+        html_text = _md_to_tg_html(text)
+        try:
+            return await bot.send_message(
+                chat_id=chat_id, text=html_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
                 disable_notification=silent,
             )
-            return str(msg.message_id)
+        except Exception:
+            return await bot.send_message(
+                chat_id=chat_id, text=text,
+                reply_markup=reply_markup,
+                disable_notification=silent,
+            )
 
     async def _send_telegram_inline(
         self,
@@ -372,11 +397,8 @@ class NotificationService:
 
         keyboard = InlineKeyboardMarkup(buttons)
 
-        msg = await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=keyboard,
-            disable_notification=silent,
+        msg = await self._send_telegram_html(
+            bot, chat_id, text, reply_markup=keyboard, silent=silent,
         )
 
         await self.db.update_notification(
