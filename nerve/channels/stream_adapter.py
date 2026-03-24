@@ -21,7 +21,7 @@ from nerve.channels.base import (
 
 logger = logging.getLogger(__name__)
 
-STREAMING_INDICATOR = "\n\n⏳"
+STREAMING_INDICATOR = "\n\n⏳⏳⏳"
 
 
 class StreamAdapter:
