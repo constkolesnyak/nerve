@@ -29,6 +29,18 @@ class NotificationService:
         self.config = config
         self.db = db
         self.engine = engine
+        self._hide_session_label: set[str] = set()  # Session ID prefixes that suppress the label
+
+    def hide_session_label_for(self, session_prefix: str) -> None:
+        """Register a session ID (or prefix) that should not show the session label."""
+        self._hide_session_label.add(session_prefix)
+
+    def _should_show_session_label(self, session_id: str) -> bool:
+        """Check whether the session label should be appended to this notification."""
+        for prefix in self._hide_session_label:
+            if session_id == prefix or session_id.startswith(prefix + ":"):
+                return False
+        return True
 
     # ------------------------------------------------------------------ #
     #  Core API (called by MCP tools)                                      #
@@ -332,7 +344,8 @@ class NotificationService:
                 text += f"\n\n{body}"
         else:
             text = body or ""
-        text += f"\n\nSession: {session_id}"
+        if self._should_show_session_label(session_id):
+            text += f"\n\nSession: {session_id}"
 
         if notif_type == "question" and options:
             return await self._send_telegram_inline(
