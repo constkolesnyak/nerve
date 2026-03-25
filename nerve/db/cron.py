@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from nerve.utils.time import utc_now_iso
 
 
 class CronStore:
     """Mixin providing cron job logging operations."""
 
     async def log_cron_start(self, job_id: str) -> int:
-        now = datetime.now().astimezone().isoformat()
         async with self.db.execute(
-            "INSERT INTO cron_logs (job_id, started_at) VALUES (?, ?)", (job_id, now)
+            "INSERT INTO cron_logs (job_id) VALUES (?)", (job_id,)
         ) as cursor:
             log_id = cursor.lastrowid
         await self.db.commit()
@@ -20,7 +19,7 @@ class CronStore:
     async def log_cron_finish(
         self, log_id: int, status: str, output: str | None = None, error: str | None = None
     ) -> None:
-        now = datetime.now().astimezone().isoformat()
+        now = utc_now_iso()
         await self.db.execute(
             "UPDATE cron_logs SET finished_at = ?, status = ?, output = ?, error = ? WHERE id = ?",
             (now, status, output, error, log_id),
@@ -48,12 +47,11 @@ class CronStore:
 
     async def get_recent_cron_runs(self, hours: int = 6) -> list[dict]:
         """Get all successful cron runs within the last N hours."""
-        cutoff = (datetime.now().astimezone() - timedelta(hours=hours)).isoformat()
         async with self.db.execute(
             """SELECT job_id, finished_at FROM cron_logs
                WHERE status = 'success'
-               AND finished_at > ?
+               AND finished_at > datetime('now', ? || ' hours')
                ORDER BY finished_at DESC""",
-            (cutoff,),
+            (f"-{hours}",),
         ) as cursor:
             return [dict(row) async for row in cursor]
