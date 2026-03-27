@@ -95,7 +95,7 @@ export function TaskToolBlock({ block }: { block: ToolCallBlockData }) {
           ? <Loader2 size={14} className="text-[#6366f1] animate-spin shrink-0" />
           : <Icon size={14} className={`shrink-0 ${block.isError ? 'text-red-400' : isDone ? 'text-green-400' : isCreate ? 'text-blue-400' : 'text-[#888]'}`} />
         }
-        <span className="text-[13px] font-medium text-[#ccc]">{label}</span>
+        <span className="text-[13px] font-medium text-[#ccc] shrink-0 whitespace-nowrap">{label}</span>
         {title && <span className="text-[12px] text-[#777] truncate">{title}</span>}
         {status && (
           <span className={`text-[10px] px-1.5 py-0.5 rounded ${STATUS_COLORS[status] || 'bg-[#333] text-[#888]'}`}>
