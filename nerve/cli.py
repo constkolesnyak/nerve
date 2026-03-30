@@ -100,6 +100,13 @@ def _get_daemon_status() -> tuple[bool, int | None]:
     return False, None
 
 
+# --- Systemd helpers ---
+
+def _is_systemd_managed() -> bool:
+    """Check if the Nerve daemon is running under systemd."""
+    return os.environ.get("INVOCATION_ID") is not None
+
+
 # --- Docker Compose helpers ---
 
 def _is_docker_mode(config) -> bool:
@@ -363,6 +370,17 @@ def restart(ctx: click.Context) -> None:
         if rc == 0:
             click.echo("Nerve restarted (Docker)")
         ctx.exit(rc)
+        return
+
+    # Systemd mode (Restart=always): just kill the process — systemd
+    # will bring it back automatically.
+    if _is_systemd_managed():
+        running, old_pid = _get_daemon_status()
+        if running:
+            click.echo(f"Restarting Nerve (PID {old_pid})... systemd will respawn.")
+            os.kill(old_pid, signal.SIGTERM)
+        else:
+            click.echo("Nerve is not running — systemd will start it shortly.")
         return
 
     # Build the command that `start` would use to launch the daemon.
