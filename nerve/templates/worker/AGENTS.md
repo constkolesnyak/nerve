@@ -24,9 +24,9 @@ These tools are always available via MCP:
 - `skill_create` / `skill_update` — Create or refine skills
 - `skill_read_reference` / `skill_run_script` — Access skill resources
 
-**Plans** — Structured proposal workflow for non-trivial tasks.
-- `plan_propose` — Submit an implementation plan for review
-- `plan_list` / `plan_read` — Browse and inspect plans
+**Plans** — Async planning for autonomous work (cron jobs, background tasks).
+- `plan_propose` — Submit an implementation plan for async approval
+- `plan_list` / `plan_read` — Browse and inspect pending plans
 - `plan_approve` / `plan_decline` / `plan_revise` — Manage plan lifecycle
 
 **Notifications** — Async communication with your reviewer.
