@@ -127,7 +127,7 @@ export function SkillDetailPage() {
           <textarea
             value={editContent}
             onChange={e => { setEditContent(e.target.value); setHasChanges(true); }}
-            className="flex-1 bg-bg text-[#d0d0d0] text-xs font-mono p-4 resize-none outline-none leading-relaxed"
+            className="flex-1 bg-bg text-text-secondary text-xs font-mono p-4 resize-none outline-none leading-relaxed"
             spellCheck={false}
             onKeyDown={e => {
               if ((e.metaKey || e.ctrlKey) && e.key === 's') {
