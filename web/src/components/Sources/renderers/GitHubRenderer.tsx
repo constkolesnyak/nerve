@@ -23,7 +23,7 @@ export function GitHubRenderer({ content, metadata, summary: _summary }: Props) 
             <Github size={14} className="text-purple-400 shrink-0" />
             <span className="text-[13px] text-text-secondary font-medium">{repoName}</span>
             {subjectType && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-950/30 text-purple-400">
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-600">
                 {subjectType}
               </span>
             )}

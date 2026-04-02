@@ -134,7 +134,7 @@ export function DiagnosticsPage() {
                   </span>
                 )}
                 {memuHealth.database?.events_missing_happened_at > 0 && (
-                  <span className="text-[12px] px-2 py-1 bg-surface border border-amber-900/30 rounded text-amber-400">
+                  <span className="text-[12px] px-2 py-1 bg-amber-500/10 border border-amber-500/20 rounded text-amber-600">
                     {memuHealth.database.events_missing_happened_at} events missing happened_at
                   </span>
                 )}
@@ -143,8 +143,8 @@ export function DiagnosticsPage() {
 
             {/* In-flight operations */}
             {memuHealth.in_flight?.length > 0 && (
-              <div className="mb-3 p-3 bg-surface border border-blue-900/30 rounded-lg">
-                <div className="text-[12px] text-blue-400 mb-1">In-flight operations:</div>
+              <div className="mb-3 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+                <div className="text-[12px] text-blue-600 mb-1">In-flight operations:</div>
                 {memuHealth.in_flight.map((op: any, i: number) => (
                   <div key={i} className="text-[12px] text-text-secondary">
                     {op.operation} — <span className="text-text-muted">{op.description}</span> ({op.elapsed_s}s)

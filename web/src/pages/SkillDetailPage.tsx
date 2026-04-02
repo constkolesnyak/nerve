@@ -90,7 +90,7 @@ export function SkillDetailPage() {
             onClick={() => toggleSkill(selectedSkill.id, !selectedSkill.enabled)}
             className={`px-2 py-1 text-xs rounded cursor-pointer ${
               selectedSkill.enabled
-                ? 'bg-emerald-900/30 text-emerald-400 hover:bg-emerald-900/50'
+                ? 'bg-emerald-500/15 text-emerald-600 hover:bg-emerald-500/25'
                 : 'bg-surface-raised text-text-dim hover:bg-surface-raised'
             }`}
           >

@@ -74,8 +74,8 @@ function jobTypeIcon(type: string) {
 
 function jobTypeBadge(type: string) {
   const styles: Record<string, string> = {
-    cron: 'text-amber-400 bg-amber-950/30',
-    source: 'text-blue-400 bg-blue-950/30',
+    cron: 'text-amber-600 bg-amber-500/15',
+    source: 'text-blue-600 bg-blue-500/15',
   };
   return (
     <span className={`text-[10px] px-1.5 py-0.5 rounded ${styles[type] || 'text-text-muted bg-surface-raised'}`}>

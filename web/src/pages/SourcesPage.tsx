@@ -42,9 +42,9 @@ function sourceIcon(source: string) {
 function sourceBadgeColor(source: string): string {
   const type = source.split(':')[0];
   switch (type) {
-    case 'gmail': return 'text-red-400 bg-red-950/30';
-    case 'github': return 'text-purple-400 bg-purple-950/30';
-    case 'telegram': return 'text-blue-400 bg-blue-950/30';
+    case 'gmail': return 'text-red-600 bg-red-500/15';
+    case 'github': return 'text-purple-600 bg-purple-500/15';
+    case 'telegram': return 'text-blue-600 bg-blue-500/15';
     default: return 'text-text-muted bg-surface-raised';
   }
 }
@@ -87,8 +87,8 @@ function HealthBadge({ state }: { state: 'healthy' | 'degraded' | 'open' | undef
   if (!state || state === 'healthy') return null;
 
   const config = {
-    degraded: { Icon: AlertTriangle, color: 'text-amber-400', bg: 'bg-amber-950/20', label: 'degraded' },
-    open:     { Icon: XCircle,       color: 'text-red-400',   bg: 'bg-red-950/20',   label: 'circuit open' },
+    degraded: { Icon: AlertTriangle, color: 'text-amber-600', bg: 'bg-amber-500/15', label: 'degraded' },
+    open:     { Icon: XCircle,       color: 'text-red-600',   bg: 'bg-red-500/15',   label: 'circuit open' },
   }[state];
   if (!config) return null;
 
@@ -188,7 +188,7 @@ function SourceSidebar() {
               else setPurgeConfirm(activeSource);
             }}
               className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[11px] rounded transition-colors cursor-pointer
-                ${purgeConfirm === activeSource ? 'bg-red-900/30 text-red-400 border border-red-900/50' : 'text-text-dim hover:text-red-400 bg-surface border border-border-subtle'}`}>
+                ${purgeConfirm === activeSource ? 'bg-red-500/15 text-red-600 border border-red-500/30' : 'text-text-dim hover:text-red-400 bg-surface border border-border-subtle'}`}>
               <Trash2 size={10} /> {purgeConfirm === activeSource ? 'Confirm?' : 'Purge source'}
             </button>
           ) : (
@@ -197,7 +197,7 @@ function SourceSidebar() {
               else setPurgeConfirm('_all');
             }}
               className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[11px] rounded transition-colors cursor-pointer
-                ${purgeConfirm === '_all' ? 'bg-red-900/30 text-red-400 border border-red-900/50' : 'text-text-dim hover:text-red-400 bg-surface border border-border-subtle'}`}>
+                ${purgeConfirm === '_all' ? 'bg-red-500/15 text-red-600 border border-red-500/30' : 'text-text-dim hover:text-red-400 bg-surface border border-border-subtle'}`}>
               <Trash2 size={10} /> {purgeConfirm === '_all' ? 'Confirm purge all?' : 'Purge all'}
             </button>
           )}
@@ -342,11 +342,11 @@ function RunsList() {
       {isUnhealthy && (
         <div className={`mx-3 mt-2 mb-1 p-2 rounded text-[12px] ${
           healthEntry.state === 'open'
-            ? 'bg-red-950/20 border border-red-900/30'
-            : 'bg-amber-950/20 border border-amber-900/30'
+            ? 'bg-red-500/10 border border-red-500/20'
+            : 'bg-amber-500/10 border border-amber-500/20'
         }`}>
           <div className={`flex items-center gap-1.5 font-medium mb-1 ${
-            healthEntry.state === 'open' ? 'text-red-400' : 'text-amber-400'
+            healthEntry.state === 'open' ? 'text-red-600' : 'text-amber-600'
           }`}>
             <AlertTriangle size={12} />
             Circuit breaker: {healthEntry.state}
@@ -476,7 +476,7 @@ function RunDetail() {
 
         {/* Error message */}
         {run.error && (
-          <div className="mt-2 p-2 bg-red-950/20 border border-red-900/30 rounded text-[12px] text-red-400">
+          <div className="mt-2 p-2 bg-red-500/10 border border-red-500/20 rounded text-[12px] text-red-600">
             {run.error}
           </div>
         )}
