@@ -12,23 +12,23 @@ function SkillCard({ skill }: { skill: Skill }) {
 
   return (
     <div
-      className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg p-4 hover:border-[#3a3a3a] cursor-pointer transition-colors"
+      className="bg-surface-raised border border-border rounded-lg p-4 hover:border-[#3a3a3a] cursor-pointer transition-colors"
       onClick={() => navigate(`/skills/${encodeURIComponent(skill.id)}`)}
     >
       <div className="flex items-start justify-between mb-2">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <h3 className="text-sm font-medium text-[#e0e0e0] truncate">{skill.name}</h3>
-            <span className="text-[10px] text-[#666] bg-[#252525] px-1.5 py-0.5 rounded">
+            <h3 className="text-sm font-medium text-text truncate">{skill.name}</h3>
+            <span className="text-[10px] text-text-dim bg-surface-raised px-1.5 py-0.5 rounded">
               v{skill.version}
             </span>
           </div>
-          <p className="text-xs text-[#888] mt-1 line-clamp-2">{skill.description}</p>
+          <p className="text-xs text-text-muted mt-1 line-clamp-2">{skill.description}</p>
         </div>
         <button
           onClick={(e) => { e.stopPropagation(); toggleSkill(skill.id, !skill.enabled); }}
           className={`ml-3 w-8 h-4 rounded-full transition-colors flex items-center shrink-0 cursor-pointer ${
-            skill.enabled ? 'bg-emerald-600 justify-end' : 'bg-[#333] justify-start'
+            skill.enabled ? 'bg-emerald-600 justify-end' : 'bg-border-subtle justify-start'
           }`}
           title={skill.enabled ? 'Enabled' : 'Disabled'}
         >
@@ -36,7 +36,7 @@ function SkillCard({ skill }: { skill: Skill }) {
         </button>
       </div>
 
-      <div className="flex items-center gap-4 mt-3 text-[10px] text-[#666]">
+      <div className="flex items-center gap-4 mt-3 text-[10px] text-text-dim">
         <div className="flex items-center gap-1">
           <Zap size={10} />
           <span>{skill.total_invocations} uses</span>
@@ -78,39 +78,39 @@ function CreateSkillDialog() {
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setShowCreateDialog(false)}>
-      <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg w-[500px] max-h-[80vh] overflow-auto" onClick={e => e.stopPropagation()}>
-        <div className="p-4 border-b border-[#2a2a2a]">
-          <h2 className="text-sm font-medium text-[#e0e0e0]">New Skill</h2>
+      <div className="bg-surface-raised border border-border rounded-lg w-[500px] max-h-[80vh] overflow-auto" onClick={e => e.stopPropagation()}>
+        <div className="p-4 border-b border-border">
+          <h2 className="text-sm font-medium text-text">New Skill</h2>
         </div>
         <div className="p-4 space-y-3">
           <div>
-            <label className="text-xs text-[#888] block mb-1">Name</label>
+            <label className="text-xs text-text-muted block mb-1">Name</label>
             <input
               value={name} onChange={e => setName(e.target.value)}
-              className="w-full bg-[#0f0f0f] border border-[#2a2a2a] rounded px-3 py-1.5 text-sm text-[#e0e0e0] outline-none focus:border-[#6366f1]"
+              className="w-full bg-bg border border-border rounded px-3 py-1.5 text-sm text-text outline-none focus:border-[#6366f1]"
               placeholder="e.g. code-review"
               autoFocus
             />
           </div>
           <div>
-            <label className="text-xs text-[#888] block mb-1">Description</label>
+            <label className="text-xs text-text-muted block mb-1">Description</label>
             <textarea
               value={description} onChange={e => setDescription(e.target.value)}
-              className="w-full bg-[#0f0f0f] border border-[#2a2a2a] rounded px-3 py-1.5 text-sm text-[#e0e0e0] outline-none focus:border-[#6366f1] min-h-[60px] resize-y"
+              className="w-full bg-bg border border-border rounded px-3 py-1.5 text-sm text-text outline-none focus:border-[#6366f1] min-h-[60px] resize-y"
               placeholder='This skill should be used when the user asks to "review code"...'
             />
           </div>
           <div>
-            <label className="text-xs text-[#888] block mb-1">Instructions (optional)</label>
+            <label className="text-xs text-text-muted block mb-1">Instructions (optional)</label>
             <textarea
               value={content} onChange={e => setContent(e.target.value)}
-              className="w-full bg-[#0f0f0f] border border-[#2a2a2a] rounded px-3 py-1.5 text-sm text-[#e0e0e0] outline-none focus:border-[#6366f1] min-h-[120px] resize-y font-mono text-xs"
+              className="w-full bg-bg border border-border rounded px-3 py-1.5 text-sm text-text outline-none focus:border-[#6366f1] min-h-[120px] resize-y font-mono text-xs"
               placeholder="Markdown instructions for the agent..."
             />
           </div>
         </div>
-        <div className="p-4 border-t border-[#2a2a2a] flex justify-end gap-2">
-          <button onClick={() => setShowCreateDialog(false)} className="px-3 py-1.5 text-xs text-[#888] hover:text-[#ccc] cursor-pointer">
+        <div className="p-4 border-t border-border flex justify-end gap-2">
+          <button onClick={() => setShowCreateDialog(false)} className="px-3 py-1.5 text-xs text-text-muted hover:text-[#ccc] cursor-pointer">
             Cancel
           </button>
           <button
@@ -134,10 +134,10 @@ export function SkillsPage() {
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[#2a2a2a] shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
         <div className="flex items-center gap-2">
-          <h1 className="text-sm font-medium text-[#e0e0e0]">Skills</h1>
-          <span className="text-[10px] text-[#666] bg-[#1a1a1a] px-1.5 py-0.5 rounded">
+          <h1 className="text-sm font-medium text-text">Skills</h1>
+          <span className="text-[10px] text-text-dim bg-surface-raised px-1.5 py-0.5 rounded">
             {skills.length}
           </span>
         </div>
@@ -145,7 +145,7 @@ export function SkillsPage() {
           <button
             onClick={syncSkills}
             disabled={actionLoading}
-            className="flex items-center gap-1 px-2 py-1 text-xs text-[#888] hover:text-[#ccc] hover:bg-[#1f1f1f] rounded cursor-pointer disabled:opacity-50"
+            className="flex items-center gap-1 px-2 py-1 text-xs text-text-muted hover:text-[#ccc] hover:bg-surface-hover rounded cursor-pointer disabled:opacity-50"
             title="Re-scan filesystem for new skills"
           >
             <RefreshCw size={12} className={actionLoading ? 'animate-spin' : ''} />
@@ -164,12 +164,12 @@ export function SkillsPage() {
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4">
         {loading ? (
-          <div className="text-center text-[#666] text-sm py-12">Loading skills...</div>
+          <div className="text-center text-text-dim text-sm py-12">Loading skills...</div>
         ) : skills.length === 0 ? (
           <div className="text-center py-12">
-            <Zap size={32} className="mx-auto text-[#333] mb-3" />
-            <p className="text-sm text-[#666] mb-1">No skills yet</p>
-            <p className="text-xs text-[#555]">
+            <Zap size={32} className="mx-auto text-text-faint mb-3" />
+            <p className="text-sm text-text-dim mb-1">No skills yet</p>
+            <p className="text-xs text-text-faint">
               Create skills to extend the agent with specialized workflows.
               <br />
               Skills are stored as SKILL.md files in <code className="text-[#6366f1]">workspace/skills/</code>

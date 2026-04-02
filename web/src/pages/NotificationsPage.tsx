@@ -6,8 +6,8 @@ import { useNotificationStore, type Notification } from '../stores/notificationS
 const STATUS_STYLES: Record<string, string> = {
   pending: 'bg-yellow-400/10 text-yellow-400 border-yellow-400/20',
   answered: 'bg-emerald-400/10 text-emerald-400 border-emerald-400/20',
-  expired: 'bg-[#333]/50 text-[#888] border-[#333]',
-  dismissed: 'bg-[#333]/50 text-[#666] border-[#333]',
+  expired: 'bg-[#333]/50 text-text-muted border-border-subtle',
+  dismissed: 'bg-[#333]/50 text-text-dim border-border-subtle',
 };
 
 const PRIORITY_DOTS: Record<string, string> = {
@@ -38,7 +38,7 @@ function FreeTextInput({ onSubmit }: { onSubmit: (text: string) => void }) {
     return (
       <button
         onClick={() => setOpen(true)}
-        className="px-3 py-1 text-sm text-[#666] border border-dashed border-[#444] rounded-lg hover:border-[#666] hover:text-[#888] cursor-pointer"
+        className="px-3 py-1 text-sm text-text-dim border border-dashed border-[#444] rounded-lg hover:border-[#666] hover:text-text-muted cursor-pointer"
       >
         Custom answer...
       </button>
@@ -60,7 +60,7 @@ function FreeTextInput({ onSubmit }: { onSubmit: (text: string) => void }) {
           }
           if (e.key === 'Escape') setOpen(false);
         }}
-        className="flex-1 bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-1 text-sm text-[#e0e0e0] outline-none focus:border-[#6366f1]"
+        className="flex-1 bg-surface-raised border border-border-subtle rounded-lg px-3 py-1 text-sm text-text outline-none focus:border-[#6366f1]"
         placeholder="Type your answer..."
       />
       <button
@@ -77,7 +77,7 @@ function FreeTextInput({ onSubmit }: { onSubmit: (text: string) => void }) {
       </button>
       <button
         onClick={() => { setText(''); setOpen(false); }}
-        className="text-[#666] hover:text-[#999] cursor-pointer"
+        className="text-text-dim hover:text-text-muted cursor-pointer"
       >
         <X size={14} />
       </button>
@@ -92,24 +92,24 @@ function NotificationCard({ notif }: { notif: Notification }) {
   const options = notif.options ? (typeof notif.options === 'string' ? JSON.parse(notif.options) : notif.options) : null;
 
   return (
-    <div className={`p-4 bg-[#141414] border rounded-lg transition-colors ${
-      notif.status === 'pending' ? 'border-[#333]' : 'border-[#222]'
+    <div className={`p-4 bg-surface border rounded-lg transition-colors ${
+      notif.status === 'pending' ? 'border-border-subtle' : 'border-border-subtle'
     }`}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             {priorityDot && <span className={`w-2 h-2 rounded-full shrink-0 ${priorityDot}`} />}
-            <h3 className="font-medium text-[15px] text-[#e0e0e0]">{notif.title}</h3>
+            <h3 className="font-medium text-[15px] text-text">{notif.title}</h3>
           </div>
           {notif.body && (
-            <p className="text-sm text-[#888] mt-1 whitespace-pre-wrap">{notif.body}</p>
+            <p className="text-sm text-text-muted mt-1 whitespace-pre-wrap">{notif.body}</p>
           )}
         </div>
         <div className="flex items-center gap-2 text-[12px] shrink-0">
           <span className={`px-2 py-0.5 rounded-full border ${STATUS_STYLES[notif.status] || STATUS_STYLES.dismissed}`}>
             {notif.status}
           </span>
-          <span className={`px-2 py-0.5 rounded-full border ${notif.type === 'question' ? 'bg-blue-400/10 text-blue-400 border-blue-400/20' : 'bg-[#333]/50 text-[#888] border-[#333]'}`}>
+          <span className={`px-2 py-0.5 rounded-full border ${notif.type === 'question' ? 'bg-blue-400/10 text-blue-400 border-blue-400/20' : 'bg-[#333]/50 text-text-muted border-border-subtle'}`}>
             {notif.type}
           </span>
         </div>
@@ -123,11 +123,11 @@ function NotificationCard({ notif }: { notif: Notification }) {
         >
           Session: {notif.session_title || notif.session_id}
         </button>
-        <span className="text-[#444]">{notif.created_at?.slice(0, 16).replace('T', ' ')}</span>
+        <span className="text-text-faint">{notif.created_at?.slice(0, 16).replace('T', ' ')}</span>
         {notif.status === 'pending' && notif.type === 'notify' && (
           <button
             onClick={() => dismissNotification(notif.id)}
-            className="flex items-center gap-1 px-2 py-0.5 rounded text-[#777] hover:text-[#bbb] hover:bg-[#1f1f1f] cursor-pointer transition-colors"
+            className="flex items-center gap-1 px-2 py-0.5 rounded text-[#777] hover:text-[#bbb] hover:bg-surface-hover cursor-pointer transition-colors"
           >
             <EyeOff size={11} />
             <span>Dismiss</span>
@@ -154,7 +154,7 @@ function NotificationCard({ notif }: { notif: Notification }) {
       {/* Show answer if answered */}
       {notif.status === 'answered' && (
         <div className="mt-2 text-sm text-emerald-400">
-          Answer: {notif.answer} <span className="text-[#555]">(via {notif.answered_by})</span>
+          Answer: {notif.answer} <span className="text-text-faint">(via {notif.answered_by})</span>
         </div>
       )}
     </div>
@@ -171,7 +171,7 @@ export function NotificationsPage() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="border-b border-[#222] px-6 py-3 flex items-center gap-4 bg-[#0f0f0f] shrink-0">
+      <div className="border-b border-border-subtle px-6 py-3 flex items-center gap-4 bg-bg shrink-0">
         <Bell size={18} className="text-[#6366f1]" />
         <h1 className="text-lg font-semibold">Notifications</h1>
 
@@ -184,7 +184,7 @@ export function NotificationsPage() {
               className={`px-3 py-1 text-[12px] rounded-full border cursor-pointer transition-colors
                 ${filter === f.value
                   ? 'bg-[#6366f1]/15 text-[#6366f1] border-[#6366f1]/30'
-                  : 'text-[#666] border-[#2a2a2a] hover:border-[#444] hover:text-[#999]'
+                  : 'text-text-dim border-border hover:border-[#444] hover:text-text-muted'
                 }`}
             >
               {f.label}
@@ -201,7 +201,7 @@ export function NotificationsPage() {
               className={`px-3 py-1 text-[12px] rounded-full border cursor-pointer transition-colors
                 ${typeFilter === f.value
                   ? 'bg-[#6366f1]/15 text-[#6366f1] border-[#6366f1]/30'
-                  : 'text-[#666] border-[#2a2a2a] hover:border-[#444] hover:text-[#999]'
+                  : 'text-text-dim border-border hover:border-[#444] hover:text-text-muted'
                 }`}
             >
               {f.label}
@@ -213,7 +213,7 @@ export function NotificationsPage() {
         {pendingCount > 0 && (
           <button
             onClick={dismissAll}
-            className="ml-auto flex items-center gap-1.5 px-3 py-1 text-[12px] rounded-lg border border-[#2a2a2a] text-[#888] hover:text-[#ccc] hover:border-[#444] hover:bg-[#1a1a1a] cursor-pointer transition-colors"
+            className="ml-auto flex items-center gap-1.5 px-3 py-1 text-[12px] rounded-lg border border-border text-text-muted hover:text-[#ccc] hover:border-[#444] hover:bg-surface-raised cursor-pointer transition-colors"
           >
             <CheckCheck size={13} />
             Dismiss All
@@ -223,9 +223,9 @@ export function NotificationsPage() {
 
       <div className="flex-1 overflow-y-auto p-6">
         {loading ? (
-          <div className="text-[#444] text-center py-10">Loading...</div>
+          <div className="text-text-faint text-center py-10">Loading...</div>
         ) : notifications.length === 0 ? (
-          <div className="text-[#444] text-center py-10">
+          <div className="text-text-faint text-center py-10">
             {filter || typeFilter ? 'No matching notifications' : 'No notifications yet.'}
           </div>
         ) : (
