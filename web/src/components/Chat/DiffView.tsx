@@ -7,12 +7,12 @@ import type { FileDiff, DiffHunk, DiffLine as DiffLineType } from '../../types/c
 
 function HunkHeader({ hunk }: { hunk: DiffHunk }) {
   return (
-    <div className="bg-[#161625] text-[11px] px-3 py-1 border-y border-[#222240] select-none flex items-center gap-2 sticky top-0 z-[1]">
+    <div className="bg-[#6366f1]/10 text-[11px] px-3 py-1 border-y border-[#6366f1]/20 select-none flex items-center gap-2 sticky top-0 z-[1]">
       <span className="text-indigo-400 font-mono">
         @@ -{hunk.old_start},{hunk.old_count} +{hunk.new_start},{hunk.new_count} @@
       </span>
       {hunk.header && (
-        <span className="text-[#555] truncate">{hunk.header}</span>
+        <span className="text-text-faint truncate">{hunk.header}</span>
       )}
     </div>
   );
@@ -23,17 +23,17 @@ function HunkHeader({ hunk }: { hunk: DiffHunk }) {
 // ------------------------------------------------------------------ //
 
 const LINE_STYLES: Record<string, string> = {
-  addition: 'bg-green-950/25',
-  deletion: 'bg-red-950/25',
+  addition: 'bg-green-500/15',
+  deletion: 'bg-red-500/15',
   context: '',
   info: '',
 };
 
 const TEXT_STYLES: Record<string, string> = {
-  addition: 'text-green-300/90',
-  deletion: 'text-red-300/90',
-  context: 'text-[#888]',
-  info: 'text-[#555] italic',
+  addition: 'text-green-600',
+  deletion: 'text-red-600',
+  context: 'text-text-muted',
+  info: 'text-text-faint italic',
 };
 
 const PREFIX: Record<string, string> = {
@@ -44,15 +44,15 @@ const PREFIX: Record<string, string> = {
 };
 
 const GUTTER_STYLES: Record<string, string> = {
-  addition: 'bg-green-950/15 border-green-900/30',
-  deletion: 'bg-red-950/15 border-red-900/30',
-  context: 'border-[#1a1a1a]',
-  info: 'border-[#1a1a1a]',
+  addition: 'bg-green-500/10 border-green-500/20',
+  deletion: 'bg-red-500/10 border-red-500/20',
+  context: 'border-surface-raised',
+  info: 'border-surface-raised',
 };
 
 function DiffLine({ line }: { line: DiffLineType }) {
   const bg = LINE_STYLES[line.type] || '';
-  const text = TEXT_STYLES[line.type] || 'text-[#888]';
+  const text = TEXT_STYLES[line.type] || 'text-text-muted';
   const prefix = PREFIX[line.type] || '';
   const gutterBg = GUTTER_STYLES[line.type] || '';
 
@@ -60,13 +60,13 @@ function DiffLine({ line }: { line: DiffLineType }) {
     <div className={`flex ${bg} hover:brightness-125 transition-[filter] duration-75 group`}>
       {/* Old line number gutter */}
       <span
-        className={`w-[48px] shrink-0 text-right pr-2 text-[10px] leading-[20px] text-[#444] select-none border-r ${gutterBg} font-mono`}
+        className={`w-[48px] shrink-0 text-right pr-2 text-[10px] leading-[20px] text-text-faint select-none border-r ${gutterBg} font-mono`}
       >
         {line.old_line ?? ''}
       </span>
       {/* New line number gutter */}
       <span
-        className={`w-[48px] shrink-0 text-right pr-2 text-[10px] leading-[20px] text-[#444] select-none border-r ${gutterBg} font-mono`}
+        className={`w-[48px] shrink-0 text-right pr-2 text-[10px] leading-[20px] text-text-faint select-none border-r ${gutterBg} font-mono`}
       >
         {line.new_line ?? ''}
       </span>
@@ -89,7 +89,7 @@ function DiffLine({ line }: { line: DiffLineType }) {
 function CollapsedLines({ count }: { count: number }) {
   if (count <= 0) return null;
   return (
-    <div className="flex items-center justify-center py-1 text-[11px] text-[#444] bg-[#0f0f0f] border-y border-[#1a1a1a]">
+    <div className="flex items-center justify-center py-1 text-[11px] text-text-faint bg-bg border-y border-surface-raised">
       <span className="px-3">⋯ {count} unchanged line{count !== 1 ? 's' : ''} ⋯</span>
     </div>
   );
@@ -106,7 +106,7 @@ function prevHunkEnd(hunk: DiffHunk): number {
 export function DiffView({ diff }: { diff: FileDiff }) {
   if (diff.binary) {
     return (
-      <div className="px-4 py-6 text-center text-[13px] text-[#555]">
+      <div className="px-4 py-6 text-center text-[13px] text-text-faint">
         Binary file — diff not available
       </div>
     );
@@ -114,7 +114,7 @@ export function DiffView({ diff }: { diff: FileDiff }) {
 
   if (diff.status === 'unchanged' || diff.hunks.length === 0) {
     return (
-      <div className="px-4 py-6 text-center text-[13px] text-[#555]">
+      <div className="px-4 py-6 text-center text-[13px] text-text-faint">
         No changes
       </div>
     );
@@ -140,7 +140,7 @@ export function DiffView({ diff }: { diff: FileDiff }) {
       ))}
 
       {diff.truncated && (
-        <div className="text-center py-3 text-[11px] text-[#555] bg-[#0f0f0f] border-t border-[#222]">
+        <div className="text-center py-3 text-[11px] text-text-faint bg-bg border-t border-border-subtle">
           Diff truncated at {2000} lines
         </div>
       )}

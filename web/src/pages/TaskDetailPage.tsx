@@ -8,7 +8,7 @@ const STATUS_STYLES: Record<string, string> = {
   pending: 'bg-yellow-400/10 text-yellow-400 border-yellow-400/20',
   in_progress: 'bg-blue-400/10 text-blue-400 border-blue-400/20',
   done: 'bg-emerald-400/10 text-emerald-400 border-emerald-400/20',
-  deferred: 'bg-[#333]/50 text-[#888] border-[#333]',
+  deferred: 'bg-border-subtle/50 text-text-muted border-border-subtle',
 };
 
 export function TaskDetailPage() {
@@ -58,7 +58,7 @@ export function TaskDetailPage() {
 
   if (detailLoading) {
     return (
-      <div className="h-full flex items-center justify-center text-[#444]">
+      <div className="h-full flex items-center justify-center text-text-faint">
         Loading...
       </div>
     );
@@ -66,7 +66,7 @@ export function TaskDetailPage() {
 
   if (!selectedTask) {
     return (
-      <div className="h-full flex flex-col items-center justify-center gap-3 text-[#444]">
+      <div className="h-full flex flex-col items-center justify-center gap-3 text-text-faint">
         <span>Task not found</span>
         <button
           onClick={() => navigate('/tasks')}
@@ -81,32 +81,32 @@ export function TaskDetailPage() {
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <div className="border-b border-[#222] px-6 py-3 bg-[#0f0f0f] shrink-0">
+      <div className="border-b border-border-subtle px-6 py-3 bg-bg shrink-0">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={() => navigate('/tasks')}
-              className="p-1.5 text-[#666] hover:text-[#aaa] hover:bg-[#1a1a1a] rounded cursor-pointer shrink-0"
+              className="p-1.5 text-text-dim hover:text-text-muted hover:bg-surface-raised rounded cursor-pointer shrink-0"
             >
               <ArrowLeft size={18} />
             </button>
-            <h1 className="text-lg font-semibold text-[#e0e0e0] truncate">{selectedTask.title}</h1>
+            <h1 className="text-lg font-semibold text-text truncate">{selectedTask.title}</h1>
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
             {/* Edit / Preview toggle */}
-            <div className="flex bg-[#1a1a1a] rounded-md border border-[#2a2a2a]">
+            <div className="flex bg-surface-raised rounded-md border border-border">
               <button
                 onClick={() => setMode('edit')}
                 className={`px-2.5 py-1.5 text-[12px] rounded-l-md cursor-pointer transition-colors
-                  ${mode === 'edit' ? 'bg-[#252525] text-[#e0e0e0]' : 'text-[#666] hover:text-[#aaa]'}`}
+                  ${mode === 'edit' ? 'bg-surface-raised text-text' : 'text-text-dim hover:text-text-muted'}`}
               >
                 <Edit3 size={14} />
               </button>
               <button
                 onClick={() => setMode('preview')}
                 className={`px-2.5 py-1.5 text-[12px] rounded-r-md cursor-pointer transition-colors
-                  ${mode === 'preview' ? 'bg-[#252525] text-[#e0e0e0]' : 'text-[#666] hover:text-[#aaa]'}`}
+                  ${mode === 'preview' ? 'bg-surface-raised text-text' : 'text-text-dim hover:text-text-muted'}`}
               >
                 <Eye size={14} />
               </button>
@@ -134,7 +134,7 @@ export function TaskDetailPage() {
           <select
             value={selectedTask.status}
             onChange={(e) => updateStatus(selectedTask.id, e.target.value)}
-            className="text-[12px] px-2 py-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-[#aaa] outline-none cursor-pointer"
+            className="text-[12px] px-2 py-1 bg-surface-raised border border-border rounded text-text-muted outline-none cursor-pointer"
           >
             <option value="pending">Pending</option>
             <option value="in_progress">In Progress</option>
@@ -142,12 +142,12 @@ export function TaskDetailPage() {
             <option value="deferred">Deferred</option>
           </select>
           {selectedTask.deadline && (
-            <span className="flex items-center gap-1 text-[#666]">
+            <span className="flex items-center gap-1 text-text-dim">
               <Calendar size={11} /> {selectedTask.deadline}
             </span>
           )}
           {selectedTask.source && (
-            <span className="text-[#555]">from {selectedTask.source}</span>
+            <span className="text-text-faint">from {selectedTask.source}</span>
           )}
           {selectedTask.source_url && (
             <a
@@ -169,7 +169,7 @@ export function TaskDetailPage() {
           value={localContent}
           onChange={e => handleContentChange(e.target.value)}
           onKeyDown={handleKeyDown}
-          className="flex-1 p-6 bg-[#0a0a0a] text-[14px] text-[#e0e0e0] font-mono leading-relaxed outline-none resize-none"
+          className="flex-1 p-6 bg-bg-sunken text-[14px] text-text font-mono leading-relaxed outline-none resize-none"
           spellCheck={false}
           placeholder="Task content..."
         />
@@ -179,7 +179,7 @@ export function TaskDetailPage() {
             {localContent ? (
               <MarkdownContent content={localContent} />
             ) : (
-              <span className="text-[#444] italic">No content</span>
+              <span className="text-text-faint italic">No content</span>
             )}
           </div>
         </div>

@@ -11,10 +11,10 @@ export function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#0f0f0f]">
+    <div className="min-h-screen flex items-center justify-center bg-bg">
       <form
         onSubmit={handleSubmit}
-        className="bg-[#1a1a1a] p-8 rounded-lg border border-[#333] w-80"
+        className="bg-surface-raised p-8 rounded-lg border border-border-subtle w-80"
       >
         <h1 className="text-xl font-semibold mb-6 text-center">Nerve</h1>
         <input
@@ -23,7 +23,7 @@ export function LoginPage() {
           onChange={(e) => setPassword(e.target.value)}
           placeholder="Password"
           autoFocus
-          className="w-full px-3 py-2 bg-[#252525] border border-[#333] rounded text-[#e0e0e0] outline-none focus:border-[#6366f1] mb-4"
+          className="w-full px-3 py-2 bg-surface-raised border border-border-subtle rounded text-text outline-none focus:border-[#6366f1] mb-4"
         />
         {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
         <button

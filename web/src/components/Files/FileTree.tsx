@@ -15,12 +15,12 @@ function FileTreeNode({ node, depth, selectedPath, onSelect }: {
       <div>
         <button
           onClick={() => setExpanded(!expanded)}
-          className="flex items-center gap-1.5 w-full text-left px-2 py-1 text-[13px] text-[#999] hover:bg-[#1a1a1a] cursor-pointer rounded"
+          className="flex items-center gap-1.5 w-full text-left px-2 py-1 text-[13px] text-text-muted hover:bg-surface-raised cursor-pointer rounded"
           style={{ paddingLeft: depth * 16 + 8 }}
         >
           {expanded
-            ? <ChevronDown size={12} className="shrink-0 text-[#555]" />
-            : <ChevronRight size={12} className="shrink-0 text-[#555]" />
+            ? <ChevronDown size={12} className="shrink-0 text-text-faint" />
+            : <ChevronRight size={12} className="shrink-0 text-text-faint" />
           }
           {expanded
             ? <FolderOpen size={14} className="shrink-0 text-[#6366f1]" />
@@ -46,10 +46,10 @@ function FileTreeNode({ node, depth, selectedPath, onSelect }: {
     <button
       onClick={() => onSelect(node.path)}
       className={`flex items-center gap-1.5 w-full text-left px-2 py-1 text-[13px] cursor-pointer rounded
-        ${isSelected ? 'bg-[#1f1f2f] text-[#e0e0e0]' : 'text-[#888] hover:bg-[#1a1a1a] hover:text-[#bbb]'}`}
+        ${isSelected ? 'bg-[#6366f1]/10 text-text' : 'text-text-muted hover:bg-surface-raised hover:text-text-secondary'}`}
       style={{ paddingLeft: depth * 16 + 20 }}
     >
-      <File size={13} className="shrink-0 text-[#666]" />
+      <File size={13} className="shrink-0 text-text-dim" />
       <span className="truncate">{node.name}</span>
     </button>
   );

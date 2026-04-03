@@ -24,21 +24,21 @@ export function FileEditor({ path, content, modified, saving, onContentChange, o
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-[#222] bg-[#0f0f0f] shrink-0">
-        <span className="text-[13px] text-[#666] font-mono">{path}</span>
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border-subtle bg-bg shrink-0">
+        <span className="text-[13px] text-text-dim font-mono">{path}</span>
         <div className="flex items-center gap-2">
-          <div className="flex bg-[#1a1a1a] rounded-md border border-[#2a2a2a]">
+          <div className="flex bg-surface-raised rounded-md border border-border">
             <button
               onClick={() => setMode('edit')}
               className={`px-2.5 py-1 text-[12px] rounded-l-md cursor-pointer
-                ${mode === 'edit' ? 'bg-[#252525] text-[#e0e0e0]' : 'text-[#666] hover:text-[#aaa]'}`}
+                ${mode === 'edit' ? 'bg-surface-raised text-text' : 'text-text-dim hover:text-text-muted'}`}
             >
               <Edit3 size={13} />
             </button>
             <button
               onClick={() => setMode('preview')}
               className={`px-2.5 py-1 text-[12px] rounded-r-md cursor-pointer
-                ${mode === 'preview' ? 'bg-[#252525] text-[#e0e0e0]' : 'text-[#666] hover:text-[#aaa]'}`}
+                ${mode === 'preview' ? 'bg-surface-raised text-text' : 'text-text-dim hover:text-text-muted'}`}
             >
               <Eye size={13} />
             </button>
@@ -62,7 +62,7 @@ export function FileEditor({ path, content, modified, saving, onContentChange, o
           value={content}
           onChange={(e) => onContentChange(e.target.value)}
           onKeyDown={handleKeyDown}
-          className="flex-1 p-4 bg-[#0a0a0a] text-[14px] text-[#e0e0e0] outline-none resize-none editor-textarea"
+          className="flex-1 p-4 bg-bg-sunken text-[14px] text-text outline-none resize-none editor-textarea"
           spellCheck={false}
         />
       ) : (
