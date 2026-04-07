@@ -6,6 +6,7 @@ interface ContextUsage {
   cache_creation_input_tokens: number;
   cache_read_input_tokens: number;
   max_context_tokens: number;
+  num_turns: number;
 }
 
 function formatTokens(n: number): string {
@@ -14,37 +15,26 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-/** Estimate USD cost from token counts (Opus 4 pricing). */
-function estimateCost(u: ContextUsage): number {
-  return (
-    u.input_tokens * 15 / 1_000_000            // fresh input
-    + u.cache_read_input_tokens * 1.5 / 1_000_000   // cache read (90% off)
-    + u.cache_creation_input_tokens * 18.75 / 1_000_000  // cache write (25% premium)
-    + u.output_tokens * 75 / 1_000_000          // output
-  );
-}
-
 export function ContextBar({ usage, sessionCostUsd }: { usage: ContextUsage; sessionCostUsd?: number }) {
   const [hovering, setHovering] = useState(false);
 
-  // The SDK reports cumulative token counts across all API sub-calls in a turn
-  // (each tool use triggers a new API call). So cache_read can exceed the context
-  // window — it's a billing metric, not context occupancy.
-  // For the progress bar, use total billed tokens as a rough activity indicator
-  // rather than a precise context window gauge.
-  const totalBilled = usage.input_tokens + usage.cache_read_input_tokens
-    + usage.cache_creation_input_tokens + usage.output_tokens;
+  // The SDK's ResultMessage.usage aggregates tokens across ALL API sub-calls
+  // in a turn (each tool use triggers a new API call). So cache_read can be
+  // N× the context window — it's summed across calls, not one call's context.
+  //
+  // To estimate the ACTUAL context window occupancy for the most recent call,
+  // we divide total input tokens by the number of API sub-calls (num_turns).
+  // Output tokens are excluded — they don't consume the context window.
+  const totalInput = usage.input_tokens + usage.cache_read_input_tokens
+    + usage.cache_creation_input_tokens;
   const max = usage.max_context_tokens;
-
-  // Estimate single-call context: if there were N sub-calls, each saw roughly
-  // the same prompt. Approximate N from how much total exceeds max.
-  const estimatedCalls = Math.max(1, Math.ceil(totalBilled / max));
-  const estimatedContext = Math.round(totalBilled / estimatedCalls);
+  const numCalls = usage.num_turns || Math.max(1, Math.ceil(totalInput / max));
+  const estimatedContext = Math.round(totalInput / numCalls);
   const pct = Math.min((estimatedContext / max) * 100, 100);
 
-  const turnCost = estimateCost(usage);
-  const cacheRate = totalBilled > 0
-    ? (usage.cache_read_input_tokens / (usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens) * 100)
+  // Cache hit rate (across all sub-calls — this IS a billing metric, so aggregate is correct)
+  const cacheRate = totalInput > 0
+    ? (usage.cache_read_input_tokens / totalInput * 100)
     : 0;
 
   // Color based on usage level
@@ -70,32 +60,35 @@ export function ContextBar({ usage, sessionCostUsd }: { usage: ContextUsage; ses
 
       {hovering && (
         <div className="absolute right-0 top-full mt-2 z-50 bg-surface-raised border border-border-subtle rounded-lg p-3 shadow-xl min-w-[220px]">
-          <div className="text-[11px] text-text-muted uppercase tracking-wider mb-2">Token Usage (this turn)</div>
+          <div className="text-[11px] text-text-muted uppercase tracking-wider mb-2">Context Window</div>
           <div className="space-y-1.5 text-[12px]">
+            <Row label="Est. context" value={estimatedContext} bold />
+            <Row label="Max context" value={max} />
+            <Row label="Remaining" value={Math.max(0, max - estimatedContext)} color={pct > 80 ? '#ef4444' : '#22c55e'} />
+
+            {/* Per-turn token breakdown */}
+            <div className="border-t border-border-subtle my-1.5" />
+            <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">
+              Turn Tokens (cumulative)
+            </div>
             <Row label="Fresh input" value={usage.input_tokens} />
-            <Row label="Output tokens" value={usage.output_tokens} />
+            <Row label="Output" value={usage.output_tokens} />
             {usage.cache_read_input_tokens > 0 && (
               <Row label="Cache read" value={usage.cache_read_input_tokens} color="#22c55e" />
             )}
             {usage.cache_creation_input_tokens > 0 && (
               <Row label="Cache created" value={usage.cache_creation_input_tokens} color="#a855f7" />
             )}
-            <div className="border-t border-border-subtle my-1.5" />
-            <Row label="Total billed" value={totalBilled} bold />
-            {estimatedCalls > 1 && (
+            {numCalls > 1 && (
               <div className="flex justify-between items-center">
                 <span className="text-text-muted">API sub-calls</span>
-                <span className="text-text-muted">~{estimatedCalls}</span>
+                <span className="text-text-muted">{numCalls}</span>
               </div>
             )}
-            <Row label="Est. context" value={estimatedContext} />
-            <Row label="Max context" value={max} />
-            <Row label="Remaining" value={Math.max(0, max - estimatedContext)} color={pct > 80 ? '#ef4444' : '#22c55e'} />
 
             {/* Cost section */}
             <div className="border-t border-border-subtle my-1.5" />
             <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">Cost</div>
-            <CostRow label="This turn" value={turnCost} />
             {(sessionCostUsd ?? 0) > 0 && (
               <CostRow label="Session total" value={sessionCostUsd!} bold />
             )}

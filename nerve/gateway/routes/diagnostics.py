@@ -83,29 +83,14 @@ async def diagnostics(user: dict = Depends(require_auth)):
         cache_stats = await deps.db.get_cache_hit_rate(days=7)
         daily_usage = await deps.db.get_usage_by_period(days=7)
         source_usage = await deps.db.get_usage_by_source(days=7)
-
-        # Add estimated cost to each daily entry
-        from nerve.db.usage import estimate_cost_from_totals
-        for day in daily_usage:
-            day["est_cost_usd"] = round(estimate_cost_from_totals({
-                "total_input": day.get("input_tokens", 0),
-                "total_output": day.get("output_tokens", 0),
-                "total_cache_read": day.get("cache_read", 0),
-                "total_cache_creation": day.get("cache_creation", 0),
-            }), 4)
-        for src in source_usage:
-            src["est_cost_usd"] = round(estimate_cost_from_totals({
-                "total_input": src.get("input_tokens", 0),
-                "total_output": src.get("output_tokens", 0),
-                "total_cache_read": src.get("cache_read", 0),
-                "total_cache_creation": src.get("cache_creation", 0),
-            }), 4)
+        model_usage = await deps.db.get_usage_by_model(days=7)
 
         usage_data = {
             "last_7d": usage_summary,
             "cache_hit_rate": cache_stats,
             "daily": daily_usage,
             "by_source": source_usage,
+            "by_model": model_usage,
         }
     except Exception:
         pass
