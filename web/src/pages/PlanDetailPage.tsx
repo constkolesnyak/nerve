@@ -6,17 +6,17 @@ import { MarkdownContent } from '../components/Chat/MarkdownContent';
 import { api } from '../api/client';
 
 const STATUS_STYLES: Record<string, string> = {
-  pending: 'bg-yellow-400/10 text-yellow-400 border-yellow-400/20',
-  approved: 'bg-emerald-400/10 text-emerald-400 border-emerald-400/20',
-  implementing: 'bg-blue-400/10 text-blue-400 border-blue-400/20',
-  declined: 'bg-red-400/10 text-red-400 border-red-400/20',
-  superseded: 'bg-[#333]/50 text-[#888] border-[#333]',
-  failed: 'bg-red-400/10 text-red-400 border-red-400/20',
+  pending: 'bg-yellow-400/10 text-hue-yellow border-yellow-400/20',
+  approved: 'bg-emerald-400/10 text-hue-emerald border-emerald-400/20',
+  implementing: 'bg-blue-400/10 text-hue-blue border-blue-400/20',
+  declined: 'bg-red-400/10 text-hue-red border-red-400/20',
+  superseded: 'bg-border-subtle/50 text-text-muted border-border-subtle',
+  failed: 'bg-red-400/10 text-hue-red border-red-400/20',
 };
 
 const TYPE_STYLES: Record<string, { label: string; className: string }> = {
-  'skill-create': { label: 'Skill', className: 'bg-purple-400/10 text-purple-400 border-purple-400/20' },
-  'skill-update': { label: 'Skill Update', className: 'bg-purple-400/10 text-purple-300 border-purple-400/20' },
+  'skill-create': { label: 'Skill', className: 'bg-purple-400/10 text-hue-purple border-purple-400/20' },
+  'skill-update': { label: 'Skill Update', className: 'bg-purple-400/10 text-hue-purple border-purple-400/20' },
 };
 
 interface HoaStatus {
@@ -57,7 +57,7 @@ export function PlanDetailPage() {
 
   if (detailLoading || !plan) {
     return (
-      <div className="h-full flex items-center justify-center text-[#444]">
+      <div className="h-full flex items-center justify-center text-text-faint">
         {detailLoading ? 'Loading...' : 'Plan not found'}
       </div>
     );
@@ -95,15 +95,15 @@ export function PlanDetailPage() {
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <div className="border-b border-[#222] px-6 py-3 bg-[#0f0f0f] shrink-0">
+      <div className="border-b border-border-subtle px-6 py-3 bg-bg shrink-0">
         <div className="flex items-center gap-3 mb-2">
           <button
             onClick={() => navigate('/plans')}
-            className="p-1 text-[#555] hover:text-[#aaa] hover:bg-[#1f1f1f] rounded cursor-pointer"
+            className="p-1 text-text-faint hover:text-text-muted hover:bg-surface-hover rounded cursor-pointer"
           >
             <ArrowLeft size={16} />
           </button>
-          <h1 className="text-lg font-semibold text-[#e0e0e0]">
+          <h1 className="text-lg font-semibold text-text">
             {plan.task_title || plan.task_id}
           </h1>
           <span className={`px-2 py-0.5 text-[12px] rounded-full border ${STATUS_STYLES[plan.status] || STATUS_STYLES.superseded}`}>
@@ -114,21 +114,21 @@ export function PlanDetailPage() {
               {TYPE_STYLES[plan.plan_type].label}
             </span>
           )}
-          <span className="text-[12px] text-[#555]">v{plan.version}</span>
+          <span className="text-[12px] text-text-faint">v{plan.version}</span>
         </div>
-        <div className="flex items-center gap-4 text-[12px] text-[#555] ml-7">
+        <div className="flex items-center gap-4 text-[12px] text-text-faint ml-7">
           <span>{plan.created_at?.slice(0, 16).replace('T', ' ')}</span>
           {plan.model && <span>{plan.model}</span>}
           <button
             onClick={() => navigate(`/tasks/${plan.task_id}`)}
-            className="flex items-center gap-1 text-[#6366f1] hover:text-[#818cf8] cursor-pointer"
+            className="flex items-center gap-1 text-accent hover:text-link cursor-pointer"
           >
             <ExternalLink size={11} /> View task
           </button>
           {isImplementing && plan.impl_session_id && (
             <button
               onClick={() => navigate(`/chat/${plan.impl_session_id}`)}
-              className="flex items-center gap-1 text-blue-400 hover:text-blue-300 cursor-pointer"
+              className="flex items-center gap-1 text-hue-blue hover:text-hue-blue cursor-pointer"
             >
               <MessageSquare size={11} /> Watch implementation
             </button>
@@ -139,17 +139,17 @@ export function PlanDetailPage() {
       {/* Plan content */}
       <div className="flex-1 overflow-y-auto p-6">
         <div className="max-w-3xl mx-auto">
-          <div className="bg-[#141414] border border-[#222] rounded-lg p-6">
+          <div className="bg-surface border border-border-subtle rounded-lg p-6">
             <MarkdownContent content={plan.content} />
           </div>
 
           {/* Feedback from previous revision — quote style */}
           {plan.feedback && (
             <div className="mt-4 flex gap-0">
-              <div className="w-1 bg-[#6366f1]/40 rounded-full shrink-0" />
+              <div className="w-1 bg-accent/40 rounded-full shrink-0" />
               <div className="pl-3 py-2">
-                <div className="text-[11px] text-[#6366f1]/60 font-medium mb-1">Revision feedback</div>
-                <div className="text-[13px] text-[#aaa] leading-relaxed whitespace-pre-wrap">{plan.feedback}</div>
+                <div className="text-[11px] text-accent/60 font-medium mb-1">Revision feedback</div>
+                <div className="text-[13px] text-text-muted leading-relaxed whitespace-pre-wrap">{plan.feedback}</div>
               </div>
             </div>
           )}
@@ -164,8 +164,8 @@ export function PlanDetailPage() {
                     onClick={() => setUseMultiAgent(!useMultiAgent)}
                     className={`flex items-center gap-2 px-3 py-1.5 text-[12px] rounded-lg border cursor-pointer transition-colors ${
                       useMultiAgent
-                        ? 'bg-amber-400/10 text-amber-400 border-amber-400/30'
-                        : 'bg-[#1a1a1a] text-[#666] border-[#333] hover:border-[#444]'
+                        ? 'bg-amber-400/10 text-hue-amber border-amber-400/30'
+                        : 'bg-surface-raised text-text-dim border-border-subtle hover:border-border'
                     }`}
                   >
                     <Users size={13} />
@@ -176,11 +176,11 @@ export function PlanDetailPage() {
                   {useMultiAgent && (
                     <div className="flex gap-3 pl-1">
                       <div className="flex items-center gap-1.5">
-                        <label className="text-[11px] text-[#555]">Mode</label>
+                        <label className="text-[11px] text-text-faint">Mode</label>
                         <select
                           value={hoaMode}
                           onChange={e => setHoaMode(e.target.value)}
-                          className="px-2 py-1 text-[12px] bg-[#1a1a1a] border border-[#333] rounded text-[#ccc] focus:outline-none focus:border-[#6366f1]/50"
+                          className="px-2 py-1 text-[12px] bg-surface-raised border border-border-subtle rounded text-text-secondary focus:outline-none focus:border-accent/50"
                         >
                           <option value="relay">Relay</option>
                           <option value="swarm">Swarm</option>
@@ -188,12 +188,12 @@ export function PlanDetailPage() {
                         </select>
                       </div>
                       <div className="flex items-center gap-1.5">
-                        <label className="text-[11px] text-[#555]">Agents</label>
+                        <label className="text-[11px] text-text-faint">Agents</label>
                         <input
                           value={hoaAgents}
                           onChange={e => setHoaAgents(e.target.value)}
                           placeholder="Claude, OpenAI"
-                          className="px-2 py-1 text-[12px] bg-[#1a1a1a] border border-[#333] rounded text-[#ccc] placeholder-[#555] focus:outline-none focus:border-[#6366f1]/50 w-40"
+                          className="px-2 py-1 text-[12px] bg-surface-raised border border-border-subtle rounded text-text-secondary placeholder:text-placeholder focus:outline-none focus:border-accent/50 w-40"
                         />
                       </div>
                     </div>
@@ -223,7 +223,7 @@ export function PlanDetailPage() {
                 </button>
                 <button
                   onClick={() => setShowFeedback(!showFeedback)}
-                  className="flex items-center gap-1.5 px-4 py-2 text-[13px] bg-[#2a2a2a] hover:bg-[#333] text-[#ccc] rounded-lg cursor-pointer"
+                  className="flex items-center gap-1.5 px-4 py-2 text-[13px] bg-surface-raised hover:bg-surface-hover text-text-secondary rounded-lg cursor-pointer"
                 >
                   <MessageSquare size={14} /> Request Revision
                 </button>
@@ -232,13 +232,13 @@ export function PlanDetailPage() {
               {showFeedback && (
                 <div className="space-y-2">
                   <div className="flex gap-0">
-                    <div className="w-1 bg-[#6366f1]/30 rounded-full shrink-0" />
+                    <div className="w-1 bg-accent/30 rounded-full shrink-0" />
                     <div className="flex-1 pl-3">
                       <textarea
                         value={feedback}
                         onChange={e => setFeedback(e.target.value)}
                         placeholder="Describe what to change..."
-                        className="w-full p-3 text-[13px] bg-[#1a1a1a] border border-[#333] rounded-lg text-[#ccc] placeholder-[#555] focus:outline-none focus:border-[#6366f1]/50 resize-none"
+                        className="w-full p-3 text-[13px] bg-surface-raised border border-border-subtle rounded-lg text-text-secondary placeholder:text-placeholder focus:outline-none focus:border-accent/50 resize-none"
                         rows={3}
                         autoFocus
                       />
@@ -248,7 +248,7 @@ export function PlanDetailPage() {
                     <button
                       onClick={handleRevise}
                       disabled={actionLoading || !feedback.trim()}
-                      className="px-4 py-2 text-[13px] bg-[#6366f1] hover:bg-[#818cf8] disabled:opacity-50 text-white rounded-lg cursor-pointer"
+                      className="px-4 py-2 text-[13px] bg-accent hover:bg-accent-hover disabled:opacity-50 text-white rounded-lg cursor-pointer"
                     >
                       Send Revision Request
                     </button>

@@ -56,7 +56,7 @@ body {
   word-wrap: break-word;
   overflow-wrap: break-word;
 }
-a { color: #6366f1; }
+a { color: #4f46e5; }
 img { max-width: 100%; height: auto; }
 table { border-collapse: collapse; max-width: 100%; }
 td, th { padding: 4px 8px; }
@@ -71,14 +71,14 @@ pre { white-space: pre-wrap; }
         <button
           onClick={() => setShowHtml(true)}
           className={`text-[12px] px-2 py-1 rounded transition-colors cursor-pointer
-            ${showHtml ? 'bg-[#6366f1]/15 text-[#6366f1]' : 'text-[#666] hover:text-[#999]'}`}
+            ${showHtml ? 'bg-accent/15 text-accent' : 'text-text-dim hover:text-text-muted'}`}
         >
           HTML
         </button>
         <button
           onClick={() => setShowHtml(false)}
           className={`text-[12px] px-2 py-1 rounded transition-colors cursor-pointer
-            ${!showHtml ? 'bg-[#6366f1]/15 text-[#6366f1]' : 'text-[#666] hover:text-[#999]'}`}
+            ${!showHtml ? 'bg-accent/15 text-accent' : 'text-text-dim hover:text-text-muted'}`}
         >
           Text
         </button>
@@ -89,7 +89,7 @@ pre { white-space: pre-wrap; }
           ref={iframeRef}
           srcDoc={styledHtml}
           sandbox="allow-same-origin"
-          className="w-full border border-[#222] rounded-lg bg-white"
+          className="w-full border border-border-subtle rounded-lg bg-white"
           style={{ height: `${iframeHeight}px` }}
           title={summary}
         />

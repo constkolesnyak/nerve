@@ -12,9 +12,9 @@ const AGENT_ICONS: Record<string, typeof Bot> = {
 };
 
 const AGENT_COLORS: Record<string, string> = {
-  Explore: 'text-cyan-400',
-  Plan: 'text-amber-400',
-  'general-purpose': 'text-indigo-400',
+  Explore: 'text-hue-cyan',
+  Plan: 'text-hue-amber',
+  'general-purpose': 'text-link',
 };
 
 export function SubagentToolBlock({ block }: { block: ToolCallBlockData }) {
@@ -29,7 +29,7 @@ export function SubagentToolBlock({ block }: { block: ToolCallBlockData }) {
   const model = block.input.model ? String(block.input.model) : null;
 
   const Icon = AGENT_ICONS[subagentType] || Bot;
-  const color = AGENT_COLORS[subagentType] || 'text-[#888]';
+  const color = AGENT_COLORS[subagentType] || 'text-text-muted';
 
   const resultText = block.result ? extractResultText(block.result) : '';
   const displayText = resultText.length > 3000 ? resultText.slice(0, 3000) + '\n\n...(truncated)' : resultText;
@@ -69,23 +69,23 @@ export function SubagentToolBlock({ block }: { block: ToolCallBlockData }) {
     : '';
 
   return (
-    <div className="my-1.5 border border-[#2a2a3a] rounded-lg bg-[#131318] overflow-hidden">
+    <div className="my-1.5 border border-border rounded-lg bg-surface overflow-hidden">
       {/* Compact card header */}
       <div className="flex items-center gap-2 px-3 py-2">
         {isRunning
-          ? <Loader2 size={14} className="text-indigo-400 animate-spin shrink-0" />
-          : <Icon size={14} className={`shrink-0 ${block.isError ? 'text-red-400' : color}`} />
+          ? <Loader2 size={14} className="text-accent animate-spin shrink-0" />
+          : <Icon size={14} className={`shrink-0 ${block.isError ? 'text-hue-red' : color}`} />
         }
         <span className={`text-[13px] font-medium ${color}`}>{subagentType}</span>
-        {description && <span className="text-[12px] text-[#777] truncate flex-1">{description}</span>}
-        {model && <span className="text-[10px] text-[#444] shrink-0">{model}</span>}
+        {description && <span className="text-[12px] text-text-muted truncate flex-1">{description}</span>}
+        {model && <span className="text-[10px] text-text-faint shrink-0">{model}</span>}
 
         <div className="ml-auto shrink-0 flex items-center gap-1.5">
           {/* View in panel button */}
           {(isRunning || resultText) && (
             <button
               onClick={handleViewInPanel}
-              className="flex items-center gap-1 px-2 py-0.5 text-[11px] text-[#666] hover:text-[#bbb] cursor-pointer transition-colors rounded hover:bg-[#1a1a22]"
+              className="flex items-center gap-1 px-2 py-0.5 text-[11px] text-text-dim hover:text-text-secondary cursor-pointer transition-colors rounded hover:bg-surface-raised"
               title="View in side panel"
             >
               View <ArrowRight size={10} />
@@ -94,7 +94,7 @@ export function SubagentToolBlock({ block }: { block: ToolCallBlockData }) {
           {/* Expand toggle (inline fallback) */}
           <button
             onClick={() => setExpanded(!expanded)}
-            className="p-1 text-[#555] hover:text-[#999] cursor-pointer transition-colors"
+            className="p-1 text-text-faint hover:text-text-muted cursor-pointer transition-colors"
           >
             {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </button>
@@ -103,26 +103,26 @@ export function SubagentToolBlock({ block }: { block: ToolCallBlockData }) {
 
       {/* Summary line when complete and collapsed */}
       {!expanded && !isRunning && summaryLine && (
-        <div className="px-3 pb-2 text-[11px] text-[#555] truncate">
+        <div className="px-3 pb-2 text-[11px] text-text-faint truncate">
           {summaryLine}{summaryLine.length >= 120 ? '...' : ''}
         </div>
       )}
 
       {/* Expanded inline view (fallback) */}
       {expanded && (
-        <div className="border-t border-[#2a2a3a]">
+        <div className="border-t border-border">
           {/* Prompt (collapsible) */}
           {prompt && (
-            <div className="border-b border-[#1e1e2e]">
+            <div className="border-b border-border-subtle">
               <button
                 onClick={() => setShowPrompt(!showPrompt)}
-                className="flex items-center gap-1.5 px-3 py-1.5 w-full text-left text-[10px] uppercase tracking-wider text-[#555] hover:text-[#777] cursor-pointer"
+                className="flex items-center gap-1.5 px-3 py-1.5 w-full text-left text-[10px] uppercase tracking-wider text-text-faint hover:text-text-muted cursor-pointer"
               >
                 {showPrompt ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
                 Prompt
               </button>
               {showPrompt && (
-                <pre className="px-3 pb-2 text-[12px] text-[#888] whitespace-pre-wrap max-h-40 overflow-y-auto">
+                <pre className="px-3 pb-2 text-[12px] text-text-muted whitespace-pre-wrap max-h-40 overflow-y-auto">
                   {prompt}
                 </pre>
               )}
@@ -137,13 +137,13 @@ export function SubagentToolBlock({ block }: { block: ToolCallBlockData }) {
           )}
 
           {block.isError && resultText && (
-            <pre className="px-3 py-2 text-[12px] text-red-400 whitespace-pre-wrap">
+            <pre className="px-3 py-2 text-[12px] text-hue-red whitespace-pre-wrap">
               {resultText}
             </pre>
           )}
 
           {isRunning && block.result === undefined && (
-            <div className="px-3 py-3 text-[12px] text-[#666] flex items-center gap-2">
+            <div className="px-3 py-3 text-[12px] text-text-dim flex items-center gap-2">
               <Loader2 size={12} className="animate-spin" /> Agent working...
             </div>
           )}

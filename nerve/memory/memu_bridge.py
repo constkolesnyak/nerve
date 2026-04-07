@@ -28,6 +28,77 @@ logger = logging.getLogger(__name__)
 # Semantic dedup threshold — set from config at init time.
 _SEMANTIC_DEDUP_THRESHOLD = 0.85
 
+
+class _BedrockLLMClient:
+    """Drop-in replacement for memU's OpenAISDKClient that uses AsyncAnthropicBedrock.
+
+    memU's MemoryService expects LLM clients with .chat(), .summarize(), and
+    attribute-level .chat_model / .embed_model.  The default OpenAISDKClient
+    uses the OpenAI SDK, which requires a base_url and api_key — both empty
+    when the provider is Bedrock (Bedrock uses IAM auth, not API keys).
+
+    This adapter wraps AsyncAnthropicBedrock and translates between memU's
+    OpenAI-style interface and the Anthropic Messages API format.
+    """
+
+    def __init__(self, *, chat_model: str, aws_region: str = "", aws_profile: str = "",
+                 aws_access_key_id: str = "", aws_secret_access_key: str = "",
+                 timeout: float = 120.0):
+        from anthropic import AsyncAnthropicBedrock
+
+        kwargs: dict[str, Any] = {"timeout": timeout}
+        if aws_region:
+            kwargs["aws_region"] = aws_region
+        if aws_profile:
+            kwargs["aws_profile"] = aws_profile
+        if aws_access_key_id:
+            kwargs["aws_access_key"] = aws_access_key_id
+            kwargs["aws_secret_key"] = aws_secret_access_key
+
+        self._bedrock = AsyncAnthropicBedrock(**kwargs)
+        self.chat_model = chat_model
+        self.embed_model = ""  # Bedrock doesn't do embeddings via this client
+
+    async def chat(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int | None = None,
+        system_prompt: str | None = None,
+        temperature: float = 0.2,
+    ) -> tuple[str, Any]:
+        kwargs: dict[str, Any] = {
+            "model": self.chat_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens or 4096,
+            "temperature": temperature,
+        }
+        if system_prompt:
+            kwargs["system"] = system_prompt
+        response = await self._bedrock.messages.create(**kwargs)
+        text = response.content[0].text if response.content else ""
+        return text, response
+
+    async def summarize(
+        self,
+        text: str,
+        *,
+        max_tokens: int | None = None,
+        system_prompt: str | None = None,
+    ) -> tuple[str, Any]:
+        prompt = system_prompt or "Summarize the text in one short paragraph."
+        return await self.chat(text, max_tokens=max_tokens, system_prompt=prompt)
+
+    async def embed(self, inputs: list[str]) -> tuple[list[list[float]], None]:
+        raise NotImplementedError("Bedrock LLM client does not support embeddings — use the OpenAI embedding profile")
+
+    async def close(self) -> None:
+        """Close the underlying httpx transport."""
+        try:
+            await self._bedrock.close()
+        except Exception:
+            pass
+
 # ---------------------------------------------------------------------------
 # Custom event extraction prompt blocks
 # ---------------------------------------------------------------------------
@@ -767,10 +838,24 @@ class MemUBridge:
 
             sqlite_dsn = self.config.memory.sqlite_dsn
 
+            # ── Bedrock detection ──
+            # When provider is Bedrock, anthropic_api_base_url and
+            # effective_api_key are both empty (Bedrock uses IAM auth).
+            # memU's OpenAISDKClient can't talk to Bedrock, so we:
+            # 1. Pass a placeholder base_url so LLMConfig validation passes
+            # 2. After MemoryService init, inject _BedrockLLMClient instances
+            is_bedrock = self.config.provider.is_bedrock
+
+            # For Bedrock we still need a base_url that passes validation
+            # inside memU's LLMConfig.  It will never be used because we
+            # replace the clients immediately after init.
+            chat_base_url = self.config.anthropic_api_base_url or "https://placeholder.invalid/v1"
+            chat_api_key = self.config.effective_api_key or "placeholder"
+
             llm_profiles: dict[str, Any] = {
                 "default": {
-                    "base_url": self.config.anthropic_api_base_url,
-                    "api_key": self.config.effective_api_key,
+                    "base_url": chat_base_url,
+                    "api_key": chat_api_key,
                     "chat_model": self.config.memory.recall_model,
                     "client_backend": "sdk",
                 },
@@ -791,8 +876,8 @@ class MemUBridge:
             fast_profile = "default"
             if self.config.memory.fast_model:
                 llm_profiles["fast"] = {
-                    "base_url": self.config.anthropic_api_base_url,
-                    "api_key": self.config.effective_api_key,
+                    "base_url": chat_base_url,
+                    "api_key": chat_api_key,
                     "chat_model": self.config.memory.fast_model,
                     "client_backend": "sdk",
                 }
@@ -802,8 +887,8 @@ class MemUBridge:
             memorize_profile = "default"
             if self.config.memory.memorize_model:
                 llm_profiles["memorize"] = {
-                    "base_url": self.config.anthropic_api_base_url,
-                    "api_key": self.config.effective_api_key,
+                    "base_url": chat_base_url,
+                    "api_key": chat_api_key,
                     "chat_model": self.config.memory.memorize_model,
                     "client_backend": "sdk",
                 }
@@ -829,7 +914,13 @@ class MemUBridge:
                     # conversations as instructions, generating long off-topic
                     # responses that exceed the per-call timeout.
                     "preprocess_llm_profile": fast_profile,
-                    "memory_extract_llm_profile": memorize_profile,
+                    # When no embedding provider is configured, all memory
+                    # work goes through Anthropic — use Haiku for extraction
+                    # too to avoid saturating the rate-limit budget.
+                    "memory_extract_llm_profile": (
+                        fast_profile if not self.config.openai_api_key
+                        else memorize_profile
+                    ),
                     "category_update_llm_profile": fast_profile,
                     # Pass Nerve's configured categories to memU so the LLM
                     # prompt only shows categories that actually exist in the
@@ -855,15 +946,27 @@ class MemUBridge:
                     },
                 },
                 retrieve_config={
+                    "method": "llm" if not self.config.openai_api_key else "rag",
                     "route_intention": False,
                     "sufficiency_check": False,
                     "resource": {"enabled": False},
+                    # Use Haiku for LLM-based ranking — cheaper and avoids
+                    # sharing Sonnet's rate-limit budget with the main agent.
+                    **({"llm_ranking_llm_profile": fast_profile}
+                       if not self.config.openai_api_key else {}),
                 },
             )
             self._available = True
             self._metrics.service_available = True
             self._metrics.initialized_at = datetime.now(timezone.utc).isoformat()
             logger.info("memU service initialized with SQLite at %s", sqlite_dsn)
+
+            # ── Bedrock client injection ──
+            # Replace the placeholder OpenAISDKClient instances with real
+            # Bedrock-backed clients.  Must happen before any LLM call
+            # (warmup, category sync, etc.).
+            if is_bedrock:
+                self._inject_bedrock_clients()
 
             await self._ensure_categories()
 
@@ -888,15 +991,118 @@ class MemUBridge:
                     len(ctx.category_name_to_id),
                 )
 
-            # Warm up the Anthropic LLM clients.  The first HTTP request on
-            # a fresh AsyncOpenAI→httpx connection to Anthropic's Cloudflare
-            # endpoint often hangs indefinitely (HTTP/2 negotiation issue).
-            # A cheap throwaway call here forces the connection open so
-            # real memorize calls don't stall.
+            # When no embedding provider is configured, replace the
+            # memorize pipeline's "categorize_items" step with one that
+            # stores items and resources with embedding=None.  This
+            # avoids KeyError on the missing "embedding" LLM profile.
+            if not self.config.openai_api_key:
+                from memu.workflow.step import WorkflowStep as _WfStep
+
+                _svc = self._service
+
+                async def _categorize_no_embed(
+                    state: dict, step_context: Any,
+                ) -> dict:
+                    svc_ctx = state["ctx"]
+                    store = state["store"]
+                    modality = state["modality"]
+                    local_path = state["local_path"]
+                    resources: list = []
+                    items: list = []
+                    relations: list = []
+                    category_updates: dict[str, list[tuple[str, str]]] = {}
+                    user_scope = state.get("user", {})
+
+                    for plan in state.get("resource_plans", []):
+                        caption_text = (plan.get("caption") or "").strip() or None
+                        res = store.resource_repo.create_resource(
+                            url=plan["resource_url"],
+                            modality=modality,
+                            local_path=local_path,
+                            caption=caption_text,
+                            embedding=None,
+                            user_data=dict(user_scope or {}),
+                        )
+                        resources.append(res)
+
+                        entries = plan.get("entries") or []
+                        if not entries:
+                            continue
+
+                        reinforce = _svc.memorize_config.enable_item_reinforcement
+                        for memory_type, summary_text, cat_names in entries:
+                            item = store.memory_item_repo.create_item(
+                                resource_id=res.id,
+                                memory_type=memory_type,
+                                summary=summary_text,
+                                embedding=None,
+                                user_data=dict(user_scope or {}),
+                                reinforce=reinforce,
+                            )
+                            items.append(item)
+                            if reinforce and item.extra.get(
+                                "reinforcement_count", 1,
+                            ) > 1:
+                                continue
+                            mapped = _svc._map_category_names_to_ids(
+                                cat_names, svc_ctx,
+                            )
+                            for cid in mapped:
+                                relations.append(
+                                    store.category_item_repo.link_item_category(
+                                        item.id, cid,
+                                        user_data=dict(user_scope or {}),
+                                    )
+                                )
+                                category_updates.setdefault(cid, []).append(
+                                    (item.id, summary_text),
+                                )
+
+                    state.update({
+                        "resources": resources,
+                        "items": items,
+                        "relations": relations,
+                        "category_updates": category_updates,
+                    })
+                    return state
+
+                self._service.replace_step(
+                    target_step_id="categorize_items",
+                    new_step=_WfStep(
+                        step_id="categorize_items",
+                        role="categorize",
+                        handler=_categorize_no_embed,
+                        requires={
+                            "resource_plans", "ctx", "store",
+                            "local_path", "modality", "user",
+                        },
+                        produces={
+                            "resources", "items",
+                            "relations", "category_updates",
+                        },
+                        capabilities={"db"},
+                    ),
+                    pipeline="memorize",
+                )
+                logger.info(
+                    "No embedding provider — replaced memorize categorize_items "
+                    "step (embeddings disabled, using LLM-based recall)"
+                )
+
+            # Warm up the LLM clients.  The first HTTP request on a fresh
+            # connection can hang (HTTP/2 negotiation issue with Cloudflare,
+            # or cold Bedrock endpoint).  A cheap throwaway call here forces
+            # the connection open so real memorize calls don't stall.
             for profile in ("memorize", "fast", "default"):
                 try:
                     client = self._service._get_llm_base_client(profile)
-                    if hasattr(client, "client"):  # OpenAISDKClient
+                    if isinstance(client, _BedrockLLMClient):
+                        await asyncio.wait_for(
+                            client.chat("ping", max_tokens=1),
+                            timeout=15,
+                        )
+                        logger.debug("Warmed up Bedrock LLM client: %s", profile)
+                    elif hasattr(client, "client"):  # OpenAISDKClient
                         await asyncio.wait_for(
                             client.client.chat.completions.create(
                                 model=client.chat_model,
@@ -1077,6 +1283,34 @@ class MemUBridge:
     # Per-call timeout for individual LLM requests (chat, embed, etc.).
     _LLM_CALL_TIMEOUT = 120
 
+    def _make_bedrock_client(self, chat_model: str) -> _BedrockLLMClient:
+        """Create a _BedrockLLMClient using Nerve's provider config."""
+        return _BedrockLLMClient(
+            chat_model=chat_model,
+            aws_region=self.config.provider.aws_region,
+            aws_profile=self.config.provider.aws_profile,
+            aws_access_key_id=self.config.provider.aws_access_key_id,
+            aws_secret_access_key=self.config.provider.aws_secret_access_key,
+        )
+
+    def _inject_bedrock_clients(self) -> None:
+        """Replace placeholder OpenAISDKClient instances with Bedrock clients.
+
+        Called once after MemoryService init when provider is Bedrock.
+        The placeholder clients were necessary for memU's config validation
+        but can't actually make API calls.
+        """
+        profiles_to_replace = {}
+        for name, cfg in self._service.llm_profiles.profiles.items():
+            # Skip the embedding profile — it uses OpenAI directly
+            if name == "embedding":
+                continue
+            profiles_to_replace[name] = cfg.chat_model
+
+        for name, model in profiles_to_replace.items():
+            self._service._llm_clients[name] = self._make_bedrock_client(model)
+            logger.info("Injected Bedrock LLM client for profile '%s' (model=%s)", name, model)
+
     def _instrument_llm_timeouts(self) -> None:
         """Configure per-call timeouts on LLM clients (two layers).
 
@@ -1097,17 +1331,19 @@ class MemUBridge:
                 client = self._service._get_llm_base_client(profile)
 
                 # --- Layer 1: httpx timeout + disable SDK retries ---
-                inner = getattr(client, "client", None)  # OpenAISDKClient.client = AsyncOpenAI
-                if inner is not None:
-                    inner.timeout = _httpx.Timeout(
-                        self._LLM_CALL_TIMEOUT,
-                        connect=10.0,
-                    )
-                    # The OpenAI SDK defaults to max_retries=2 and 600s timeout.
-                    # With our 120s asyncio.wait_for wrapper, SDK retries just
-                    # waste time inside a doomed coroutine.  Disable them so the
-                    # httpx timeout fires cleanly and propagates immediately.
-                    inner.max_retries = 0
+                # (Bedrock clients use their own timeout; skip Layer 1 for them)
+                if not isinstance(client, _BedrockLLMClient):
+                    inner = getattr(client, "client", None)  # OpenAISDKClient.client = AsyncOpenAI
+                    if inner is not None:
+                        inner.timeout = _httpx.Timeout(
+                            self._LLM_CALL_TIMEOUT,
+                            connect=10.0,
+                        )
+                        # The OpenAI SDK defaults to max_retries=2 and 600s timeout.
+                        # With our 120s asyncio.wait_for wrapper, SDK retries just
+                        # waste time inside a doomed coroutine.  Disable them so the
+                        # httpx timeout fires cleanly and propagates immediately.
+                        inner.max_retries = 0
 
                 # --- Layer 2: asyncio.wait_for wrapper ---
                 if not callable(getattr(client, "chat", None)):
@@ -1194,17 +1430,23 @@ class MemUBridge:
         """
         try:
             client = self._service._get_llm_base_client(profile)
-            if not hasattr(client, "client"):
-                return "unknown (no SDK client)"
             t0 = time.monotonic()
-            await asyncio.wait_for(
-                client.client.chat.completions.create(
-                    model=client.chat_model,
-                    messages=[{"role": "user", "content": "ping"}],
-                    max_tokens=1,
-                ),
-                timeout=15,
-            )
+            if isinstance(client, _BedrockLLMClient):
+                await asyncio.wait_for(
+                    client.chat("ping", max_tokens=1),
+                    timeout=15,
+                )
+            elif hasattr(client, "client"):
+                await asyncio.wait_for(
+                    client.client.chat.completions.create(
+                        model=client.chat_model,
+                        messages=[{"role": "user", "content": "ping"}],
+                        max_tokens=1,
+                    ),
+                    timeout=15,
+                )
+            else:
+                return "unknown (no SDK client)"
             elapsed = time.monotonic() - t0
             return f"ok ({profile}/{client.chat_model} responded in {elapsed:.1f}s)"
         except Exception as e:
@@ -1218,6 +1460,8 @@ class MemUBridge:
         client so _get_llm_base_client() creates a new one, then re-apply
         per-call timeouts.
         """
+        is_bedrock = self.config.provider.is_bedrock
+
         # Probe API health before resetting — helps diagnose whether the
         # issue is model-specific throttling vs. API-wide outage.
         health = await self._probe_api_health("fast")
@@ -1228,22 +1472,31 @@ class MemUBridge:
                 client = self._service._llm_clients.get(profile)
                 if client is None:
                     continue
-                # Close the underlying httpx transport (async when possible)
-                inner = getattr(client, "client", None)  # OpenAISDKClient
-                http = getattr(inner, "_client", None) or getattr(inner, "http_client", None)
-                if http:
-                    if hasattr(http, "aclose"):
-                        try:
-                            await http.aclose()
-                        except Exception:
-                            pass  # Best-effort async close
-                    elif hasattr(http, "close"):
-                        http.close()
+                # Close the underlying transport
+                if isinstance(client, _BedrockLLMClient):
+                    await client.close()
+                else:
+                    inner = getattr(client, "client", None)  # OpenAISDKClient
+                    http = getattr(inner, "_client", None) or getattr(inner, "http_client", None)
+                    if http:
+                        if hasattr(http, "aclose"):
+                            try:
+                                await http.aclose()
+                            except Exception:
+                                pass  # Best-effort async close
+                        elif hasattr(http, "close"):
+                            http.close()
                 # Evict so next access creates a fresh client
                 del self._service._llm_clients[profile]
                 logger.info("Evicted stale LLM client for profile '%s'", profile)
             except Exception as e:
                 logger.warning("Could not reset LLM client for '%s': %s", profile, e)
+
+        # For Bedrock, re-inject fresh Bedrock clients (memU's default
+        # _get_llm_base_client would recreate broken OpenAISDK ones).
+        if is_bedrock:
+            self._inject_bedrock_clients()
+
         # Re-apply per-call timeouts on the fresh clients
         self._instrument_llm_timeouts()
 
@@ -1253,7 +1506,14 @@ class MemUBridge:
         for profile in ("memorize", "fast"):
             try:
                 client = self._service._get_llm_base_client(profile)
-                if hasattr(client, "client"):
+                if isinstance(client, _BedrockLLMClient):
+                    # Bedrock warmup — use the adapter's chat method directly
+                    await asyncio.wait_for(
+                        client.chat("ping", max_tokens=1),
+                        timeout=15,
+                    )
+                    logger.info("Warmed up Bedrock LLM client after reset: %s", profile)
+                elif hasattr(client, "client"):
                     await asyncio.wait_for(
                         client.client.chat.completions.create(
                             model=client.chat_model,
@@ -1545,19 +1805,14 @@ class MemUBridge:
             logger.warning("Event date resolution failed: %s", e)
 
     def _get_anthropic_client(self) -> Any:
-        """Get or create the shared sync Anthropic client."""
+        """Get or create the shared sync Anthropic client.
+
+        Uses the config factory method which returns AnthropicBedrock
+        when provider is "bedrock", or standard Anthropic otherwise.
+        """
         if self._anthropic_client is not None:
             return self._anthropic_client
-        import anthropic
-        base_url = self.config.anthropic_api_base_url.rstrip("/")
-        # Strip /v1/ suffix — Anthropic SDK prepends it internally.
-        if base_url.endswith("/v1"):
-            base_url = base_url[:-3]
-        self._anthropic_client = anthropic.Anthropic(
-            api_key=self.config.effective_api_key,
-            base_url=base_url,
-            timeout=60.0,
-        )
+        self._anthropic_client = self.config.create_anthropic_client(timeout=60.0)
         return self._anthropic_client
 
     def _resolve_dates_via_llm(
@@ -1859,10 +2114,15 @@ class MemUBridge:
         if not self._available or not self._service:
             return False
         try:
-            # Generate embedding for the category
-            embed_text = f"{name}: {description}" if description else name
-            vecs = await self._service._get_llm_client("embedding").embed([embed_text])
-            embedding = vecs[0]
+            # Generate embedding for the category (requires OpenAI key)
+            embedding = None
+            if self._has_embeddings:
+                try:
+                    embed_text = f"{name}: {description}" if description else name
+                    vecs = await self._service._get_llm_client("embedding").embed([embed_text])
+                    embedding = vecs[0]
+                except Exception as e:
+                    logger.warning("Could not embed category %s: %s", name, e)
 
             # Create in the DB repo
             cat = self._service.database.memory_category_repo.get_or_create_category(
@@ -1912,17 +2172,23 @@ class MemUBridge:
             new_desc = description if description is not None else cat.description
             new_summary = summary if summary is not None else cat.summary
 
-            # Re-embed from the updated text
-            embed_text = f"{new_name}: {new_desc}"
-            if new_summary:
-                embed_text += f"\n{new_summary}"
-            vecs = await self._service._get_llm_client("embedding").embed([embed_text])
+            # Re-embed from the updated text (requires OpenAI key)
+            embedding = None
+            if self._has_embeddings:
+                try:
+                    embed_text = f"{new_name}: {new_desc}"
+                    if new_summary:
+                        embed_text += f"\n{new_summary}"
+                    vecs = await self._service._get_llm_client("embedding").embed([embed_text])
+                    embedding = vecs[0]
+                except Exception as e:
+                    logger.warning("Could not re-embed category %s: %s", category_id, e)
 
             repo.update_category(
                 category_id=category_id,
                 description=new_desc if description is not None else None,
                 summary=new_summary if summary is not None else None,
-                embedding=vecs[0],
+                embedding=embedding,
             )
             logger.info("Updated category: %s", category_id)
             await self._audit("category_updated", "category", category_id, source, {
@@ -2097,3 +2363,8 @@ class MemUBridge:
     @property
     def available(self) -> bool:
         return self._available
+
+    @property
+    def _has_embeddings(self) -> bool:
+        """Whether an embedding provider (e.g. OpenAI) is configured."""
+        return bool(self.config.openai_api_key)

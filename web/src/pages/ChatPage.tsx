@@ -15,6 +15,17 @@ const STATUS_LABELS: Record<string, string> = {
   writing: 'Writing...',
 };
 
+/** Format a model identifier into a short display label. */
+function formatModelLabel(model: string): string {
+  const m = model.replace(/^claude-/, '');
+  const match = m.match(/^(\w+)-(\d+)-(\d+)/);
+  if (match) {
+    const name = match[1].charAt(0).toUpperCase() + match[1].slice(1);
+    return `${name} ${match[2]}.${match[3]}`;
+  }
+  return m.charAt(0).toUpperCase() + m.slice(1);
+}
+
 export function ChatPage() {
   const { sessionId } = useParams();
   const {
@@ -81,11 +92,11 @@ export function ChatPage() {
         {/* Chat column */}
         <div className="flex-1 flex flex-col min-w-0">
           {/* Header */}
-          <div className="border-b border-[#222] px-5 py-2.5 flex items-center justify-between bg-[#0f0f0f] shrink-0">
+          <div className="border-b border-border-subtle px-5 py-2.5 flex items-center justify-between bg-bg shrink-0">
             <div className="flex items-center gap-2">
               <button
                 onClick={toggleSidebar}
-                className="w-6 h-6 flex items-center justify-center text-[#444] hover:text-[#888] cursor-pointer transition-colors rounded"
+                className="w-6 h-6 flex items-center justify-center text-text-faint hover:text-text-muted cursor-pointer transition-colors rounded"
                 title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
               >
                 {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
@@ -93,9 +104,17 @@ export function ChatPage() {
               <span className="font-medium text-[15px]">
                 {sessions.find(s => s.id === activeSession)?.title || activeSession}
               </span>
+              {(() => {
+                const model = sessions.find(s => s.id === activeSession)?.model;
+                return model ? (
+                  <span className="text-[11px] text-text-faint bg-surface-raised px-1.5 py-0.5 rounded">
+                    {formatModelLabel(model)}
+                  </span>
+                ) : null;
+              })()}
               {statusLabel && (
-                <div className="flex items-center gap-1.5 text-[12px] text-[#888]">
-                  <Loader2 size={12} className="animate-spin text-[#6366f1]" />
+                <div className="flex items-center gap-1.5 text-[12px] text-text-muted">
+                  <Loader2 size={12} className="animate-spin text-accent" />
                   <span>{statusLabel}</span>
                 </div>
               )}
@@ -111,8 +130,8 @@ export function ChatPage() {
                   onClick={openFilesPanel}
                   className={`flex items-center gap-1.5 px-2 py-1 rounded text-[12px] transition-colors cursor-pointer ${
                     filesPanelActive
-                      ? 'text-teal-400 bg-teal-400/10'
-                      : 'text-[#888] hover:text-[#ccc] hover:bg-[#1a1a1a]'
+                      ? 'text-hue-teal bg-teal-400/10'
+                      : 'text-text-muted hover:text-text-secondary hover:bg-surface-raised'
                   }`}
                   title="Modified files"
                 >
@@ -120,12 +139,12 @@ export function ChatPage() {
                   <span className="tabular-nums">{fileCount}</span>
                 </button>
               )}
-              {contextUsage && <ContextBar usage={contextUsage} />}
+              {contextUsage && <ContextBar usage={contextUsage} sessionCostUsd={sessions.find(s => s.id === activeSession)?.total_cost_usd} />}
             </div>
           </div>
 
           {loading ? (
-            <div className="flex-1 flex items-center justify-center text-[#444]">Loading...</div>
+            <div className="flex-1 flex items-center justify-center text-text-faint">Loading...</div>
           ) : (
             <MessageList
               messages={messages}

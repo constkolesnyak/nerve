@@ -3,7 +3,7 @@ import { NavRail } from './NavRail';
 
 export function AppShell() {
   return (
-    <div className="h-screen flex bg-[#0f0f0f]">
+    <div className="h-screen flex bg-bg">
       <NavRail />
       <div className="flex-1 min-w-0">
         <Outlet />

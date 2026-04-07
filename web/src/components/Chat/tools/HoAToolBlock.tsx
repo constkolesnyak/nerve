@@ -4,13 +4,13 @@ import type { ToolCallBlockData } from '../../../types/chat';
 import { MarkdownContent } from '../MarkdownContent';
 
 const PROVIDER_COLORS: Record<string, string> = {
-  anthropic: 'bg-orange-400/20 text-orange-300 border-orange-400/30',
-  openai: 'bg-emerald-400/20 text-emerald-300 border-emerald-400/30',
-  gemini: 'bg-blue-400/20 text-blue-300 border-blue-400/30',
+  anthropic: 'bg-orange-400/20 text-hue-orange border-orange-400/30',
+  openai: 'bg-emerald-400/20 text-hue-emerald border-emerald-400/30',
+  gemini: 'bg-blue-400/20 text-hue-blue border-blue-400/30',
 };
 
 function getProviderStyle(kind?: string) {
-  if (!kind) return 'bg-[#2a2a2a] text-[#888] border-[#333]';
+  if (!kind) return 'bg-surface-raised text-text-muted border-border-subtle';
   return PROVIDER_COLORS[kind.toLowerCase()] || PROVIDER_COLORS.anthropic;
 }
 
@@ -43,22 +43,22 @@ export function HoAToolBlock({ block }: { block: ToolCallBlockData }) {
   const agents = String(block.input?.agents || '');
 
   return (
-    <div className="my-1.5 border border-amber-400/20 rounded-lg bg-[#141414] overflow-hidden">
+    <div className="my-1.5 border border-amber-400/20 rounded-lg bg-surface overflow-hidden">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 w-full px-3 py-2 text-left cursor-pointer hover:bg-[#1a1a1a] transition-colors"
+        className="flex items-center gap-2 w-full px-3 py-2 text-left cursor-pointer hover:bg-surface-raised transition-colors"
       >
         {isRunning
-          ? <Loader2 size={14} className="text-amber-400 animate-spin shrink-0" />
+          ? <Loader2 size={14} className="text-hue-amber animate-spin shrink-0" />
           : block.isError
-            ? <X size={14} className="text-red-400 shrink-0" />
-            : <Check size={14} className="text-emerald-400 shrink-0" />
+            ? <X size={14} className="text-hue-red shrink-0" />
+            : <Check size={14} className="text-hue-emerald shrink-0" />
         }
-        <Users size={14} className="text-amber-400 shrink-0" />
-        <span className="text-[13px] font-mono font-medium text-[#ccc]">hoa_execute</span>
-        <span className="text-[12px] text-amber-400/60 font-mono">{mode}</span>
-        {activeLabel && isRunning && <span className="text-[12px] text-[#888]">· {activeLabel}</span>}
-        {agents && !activeLabel && <span className="text-[12px] text-[#555] font-mono truncate">{agents}</span>}
+        <Users size={14} className="text-hue-amber shrink-0" />
+        <span className="text-[13px] font-mono font-medium text-text-secondary">hoa_execute</span>
+        <span className="text-[12px] text-hue-amber/60 font-mono">{mode}</span>
+        {activeLabel && isRunning && <span className="text-[12px] text-text-muted">· {activeLabel}</span>}
+        {agents && !activeLabel && <span className="text-[12px] text-text-faint font-mono truncate">{agents}</span>}
 
         {isRunning && activeAgent ? (
           <span className={`ml-2 px-1.5 py-0.5 text-[10px] rounded border ${getProviderStyle(activeProvider)}`}>
@@ -67,7 +67,7 @@ export function HoAToolBlock({ block }: { block: ToolCallBlockData }) {
         ) : null}
 
         <div className="ml-auto shrink-0">
-          {expanded ? <ChevronDown size={14} className="text-[#555]" /> : <ChevronRight size={14} className="text-[#555]" />}
+          {expanded ? <ChevronDown size={14} className="text-text-faint" /> : <ChevronRight size={14} className="text-text-faint" />}
         </div>
       </button>
 
@@ -82,13 +82,13 @@ export function HoAToolBlock({ block }: { block: ToolCallBlockData }) {
                     {/* Tool call from inner agent — special rendering */}
                     {event.event === 'tool_call' ? (
                       <>
-                        <span className="text-[#555] font-mono">{event.tool}</span>
-                        <span className="text-[#666] font-mono truncate">{event.detail}</span>
+                        <span className="text-text-faint font-mono">{event.tool}</span>
+                        <span className="text-text-dim font-mono truncate">{event.detail}</span>
                       </>
                     ) : (
                       <>
                         {event.label && event.event !== 'block_log' && (
-                          <span className="px-1.5 py-0.5 rounded bg-[#2a2a2a] text-[#aaa] border border-[#333] text-[10px]">
+                          <span className="px-1.5 py-0.5 rounded bg-surface-raised text-text-muted border border-border-subtle text-[10px]">
                             {event.label}
                           </span>
                         )}
@@ -98,13 +98,13 @@ export function HoAToolBlock({ block }: { block: ToolCallBlockData }) {
                           </span>
                         )}
                         {event.iteration !== undefined && event.event !== 'block_log' && (
-                          <span className="text-[#555]">iter {event.iteration}</span>
+                          <span className="text-text-faint">iter {event.iteration}</span>
                         )}
                         {event.message && (
-                          <span className="text-[#777] truncate">{event.message}</span>
+                          <span className="text-text-muted truncate">{event.message}</span>
                         )}
                         {!event.message && !event.agent && !event.label && (
-                          <span className="text-[#555] font-mono truncate">
+                          <span className="text-text-faint font-mono truncate">
                             {JSON.stringify(event).slice(0, 80)}
                           </span>
                         )}
@@ -118,23 +118,23 @@ export function HoAToolBlock({ block }: { block: ToolCallBlockData }) {
 
           {/* Running indicator when no events yet */}
           {isRunning && events.length === 0 && (
-            <div className="px-3 py-3 text-[12px] text-[#666] flex items-center gap-2">
+            <div className="px-3 py-3 text-[12px] text-text-dim flex items-center gap-2">
               <Loader2 size={12} className="animate-spin" /> Starting multi-agent execution...
             </div>
           )}
 
           {/* Result */}
           {block.result !== undefined && (
-            <div className="px-3 py-2 border-t border-[#222]">
-              <div className="text-[10px] uppercase tracking-wider text-[#555] mb-1">
+            <div className="px-3 py-2 border-t border-border-subtle">
+              <div className="text-[10px] uppercase tracking-wider text-text-faint mb-1">
                 {block.isError ? 'Error' : 'Result'}
               </div>
               {block.isError ? (
-                <pre className="text-[12px] font-mono whitespace-pre-wrap overflow-x-auto max-h-80 overflow-y-auto bg-[#0f0f0f] rounded p-2 border border-[#222] text-red-400">
+                <pre className="text-[12px] font-mono whitespace-pre-wrap overflow-x-auto max-h-80 overflow-y-auto bg-bg rounded p-2 border border-border-subtle text-hue-red">
                   {block.result}
                 </pre>
               ) : (
-                <div className="text-[12px] text-[#999] max-h-96 overflow-y-auto bg-[#0f0f0f] rounded p-3 border border-[#222]">
+                <div className="text-[12px] text-text-muted max-h-96 overflow-y-auto bg-bg rounded p-3 border border-border-subtle">
                   <MarkdownContent content={block.result} />
                 </div>
               )}

@@ -53,6 +53,128 @@ except ImportError:
 
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
+# Anthropic API image limits
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+# Magic byte signatures for supported image formats.
+# Each format maps to a list of valid signatures.  A signature is a list
+# of (magic_bytes, offset) pairs that must ALL match (AND logic).
+_IMAGE_MAGIC: dict[str, list[list[tuple[bytes, int]]]] = {
+    ".png":  [[(b"\x89PNG\r\n\x1a\n", 0)]],
+    ".jpg":  [[(b"\xff\xd8\xff", 0)]],
+    ".jpeg": [[(b"\xff\xd8\xff", 0)]],
+    ".gif":  [[(b"GIF87a", 0)], [(b"GIF89a", 0)]],
+    # WebP is RIFF container: must have RIFF at 0 AND WEBP at 8
+    ".webp": [[(b"RIFF", 0), (b"WEBP", 8)]],
+}
+
+
+def _validate_image_file(file_path: str) -> str | None:
+    """Validate that a file with an image extension contains actual image data.
+
+    Returns None if valid, or an error string describing the problem.
+    This prevents the CLI from base64-encoding non-image files (e.g. HTML
+    redirect pages saved with a .png extension) and poisoning the
+    conversation context with an unprocessable image block.
+    """
+    from pathlib import Path
+
+    ext = Path(file_path).suffix.lower()
+    if ext not in _IMAGE_EXTENSIONS:
+        return None  # Not an image — nothing to validate
+
+    try:
+        size = os.path.getsize(file_path)
+    except OSError:
+        return None  # Let the Read tool handle missing files
+
+    if size == 0:
+        return f"Image file is empty (0 bytes): {file_path}"
+
+    if size > _MAX_IMAGE_BYTES:
+        size_mb = size / (1024 * 1024)
+        return (
+            f"Image file too large ({size_mb:.1f} MB > 5 MB API limit): {file_path}. "
+            f"The Anthropic API rejects images larger than 5 MB."
+        )
+
+    # Check magic bytes
+    magic_specs = _IMAGE_MAGIC.get(ext, [])
+    if not magic_specs:
+        return None  # No magic spec — let it through
+
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(16)
+    except OSError:
+        return None  # Let the Read tool handle I/O errors
+
+    # Each signature is a list of (bytes, offset) pairs — ALL must match.
+    # Multiple signatures per format are OR'd (e.g. GIF87a vs GIF89a).
+    for signature in magic_specs:
+        if all(
+            header[off: off + len(magic)] == magic
+            for magic, off in signature
+        ):
+            return None  # Valid magic — good to go
+
+    # None of the magic signatures matched
+    # Check if it's actually HTML (common when auth fails on image URLs)
+    is_html = header.lstrip()[:5].lower() in (b"<!doc", b"<html", b"<?xml")
+    hint = (
+        " The file appears to contain HTML — it may be a redirect or error page "
+        "downloaded instead of the actual image."
+        if is_html
+        else " The file header does not match any supported image format "
+        "(JPEG, PNG, GIF, WebP)."
+    )
+    return (
+        f"File {file_path} has {ext} extension but does not contain valid image data.{hint} "
+        f"Reading this file would poison the conversation with an unprocessable image block."
+    )
+
+
+def _validate_image_data(data_b64: str, media_type: str) -> str | None:
+    """Validate base64-encoded image data before sending to the API.
+
+    Returns None if valid, or an error string describing the problem.
+    Used for images entering through Nerve's own pipeline (Telegram, etc).
+    """
+    import base64
+
+    try:
+        raw = base64.b64decode(data_b64[:64])  # Only need first bytes
+    except Exception:
+        return f"Invalid base64 encoding for {media_type} image"
+
+    if len(raw) < 4:
+        return f"Image data too small ({len(raw)} bytes) for {media_type}"
+
+    # Map media_type to extension for magic check
+    type_to_ext = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+    }
+    ext = type_to_ext.get(media_type)
+    if not ext:
+        return None  # Unknown type — let the API decide
+
+    magic_specs = _IMAGE_MAGIC.get(ext, [])
+    for signature in magic_specs:
+        if all(
+            raw[off: off + len(magic)] == magic
+            for magic, off in signature
+        ):
+            return None  # Valid
+
+    return (
+        f"Image data does not match declared type {media_type}. "
+        f"The file header bytes do not contain a valid {ext.upper().strip('.')} signature."
+    )
+
 
 def _sanitize_surrogates(s: str) -> str:
     """Remove orphaned UTF-16 surrogates that break JSON serialization.
@@ -659,12 +781,32 @@ class AgentEngine:
             # No allowed_tools — can_use_tool callback handles permissions.
             # External MCP server tools are discovered at connection time,
             # so we can't enumerate them upfront.
+            env=self._build_env(),
             cwd=str(self.config.workspace),
             mcp_servers=self._build_mcp_servers(session_id),
             # Claude Code plugins — loaded via --plugin-dir so the CLI
             # handles OAuth, credentials, and plugin lifecycle natively.
             plugins=self._claude_code_plugins,
         )
+
+
+    def _build_env(self) -> dict[str, str]:
+        """Build environment variables for the SDK subprocess."""
+        env: dict[str, str] = {}
+        if self.config.provider.is_bedrock:
+            env["CLAUDE_CODE_USE_BEDROCK"] = "1"
+            if self.config.provider.aws_region:
+                env["AWS_REGION"] = self.config.provider.aws_region
+            if self.config.provider.aws_profile:
+                env["AWS_PROFILE"] = self.config.provider.aws_profile
+            if self.config.provider.aws_access_key_id:
+                env["AWS_ACCESS_KEY_ID"] = self.config.provider.aws_access_key_id
+                env["AWS_SECRET_ACCESS_KEY"] = self.config.provider.aws_secret_access_key
+        else:
+            api_key = self.config.effective_api_key
+            if api_key:
+                env["ANTHROPIC_API_KEY"] = api_key
+        return env
 
     def _build_mcp_servers(self, session_id: str) -> dict[str, Any]:
         """Build the mcp_servers dict: built-in nerve + external servers from config.
@@ -692,7 +834,7 @@ class AgentEngine:
         return servers
 
     def _build_snapshot_hooks(self, session_id: str) -> dict:
-        """Build PreToolUse hooks for capturing file snapshots before modification."""
+        """Build PreToolUse hooks for file snapshots and image validation."""
         from nerve.agent.interactive import _read_file_safe
 
         captured_files: set[str] = set()
@@ -714,11 +856,49 @@ class AgentEngine:
             # Allow the tool to proceed
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
 
+        async def _validate_image_hook(hook_input, tool_use_id, context):
+            """PreToolUse hook: validate image files before Read to prevent
+            poisoning the conversation with unprocessable image data.
+
+            The CLI's Read tool detects images by file extension and base64-
+            encodes them into image content blocks.  If the file isn't a valid
+            image (e.g. an HTML redirect saved as .png), the API rejects it
+            with 400 "Could not process image".  Worse, the bad block persists
+            in the CLI's conversation history, causing *every* subsequent turn
+            to fail — an unrecoverable poison loop.
+
+            This hook checks magic bytes and size *before* Read executes,
+            blocking invalid files with a clear error message so the agent
+            can adjust.
+            """
+            tool_input = hook_input.get("tool_input", {})
+            file_path = tool_input.get("file_path", "")
+
+            error = _validate_image_file(file_path)
+            if error:
+                logger.warning(
+                    "Blocked Read of invalid image for session %s: %s",
+                    session_id[:8], error,
+                )
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": error,
+                    },
+                }
+
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
+
         return {
             "PreToolUse": [
                 HookMatcher(
                     matcher="Edit|Write|NotebookEdit",
                     hooks=[_snapshot_hook],
+                ),
+                HookMatcher(
+                    matcher="Read",
+                    hooks=[_validate_image_hook],
                 ),
             ],
         }
@@ -820,11 +1000,15 @@ class AgentEngine:
             # Determine if this is a fork
             is_fork = fork_from is not None
 
-            # Create interactive tool handler for this session
+            # Create interactive tool handler for this session.
+            # Non-web sessions (telegram, cron, hook) cannot handle interactive
+            # tools — auto-deny them to prevent deadlocks.
+            is_interactive = source in ("web",)
             handler = InteractiveToolHandler(
                 session_id=session_id,
                 broadcast_fn=broadcaster.broadcast,
                 snapshot_fn=self._save_file_snapshot,
+                interactive_capable=is_interactive,
             )
             register_handler(session_id, handler)
 
@@ -839,7 +1023,8 @@ class AgentEngine:
             await client.connect()
             self.sessions.set_client(session_id, client)
 
-            # Record connected_at
+            # Record connected_at and the resolved model
+            resolved_model = options.model
             now = datetime.now(timezone.utc).isoformat()
             connected_at = session.get("connected_at") if session and sdk_resume_id else now
             await self.sessions.mark_active(
@@ -847,6 +1032,7 @@ class AgentEngine:
                 sdk_session_id=sdk_resume_id,
                 connected_at=connected_at,
             )
+            await self.db.update_session_fields(session_id, {"model": resolved_model})
 
             logger.info(
                 "Created persistent client for session %s%s",
@@ -1158,6 +1344,8 @@ class AgentEngine:
         last_usage: dict | None = None
         sdk_session_id: str | None = None
         active_subagents: dict[str, float] = {}  # tool_use_id -> monotonic start
+        result_meta: dict | None = None  # ResultMessage fields beyond usage
+        last_model: str | None = None  # model from most recent AssistantMessage
 
         try:
             # Get or create persistent client for this session
@@ -1197,6 +1385,25 @@ class AgentEngine:
                 for img in images:
                     # PDFs use "document" content block; images use "image"
                     block_type = "document" if img["media_type"] == "application/pdf" else "image"
+
+                    # Validate image data before sending — prevent poisoning
+                    # the CLI's conversation with unprocessable images.
+                    if block_type == "image":
+                        img_error = _validate_image_data(
+                            img["data"], img["media_type"],
+                        )
+                        if img_error:
+                            logger.warning(
+                                "Skipping invalid image for session %s: %s",
+                                session_id[:8], img_error,
+                            )
+                            # Inject as text so the agent knows what happened
+                            content_blocks.append({
+                                "type": "text",
+                                "text": f"[Image skipped: {img_error}]",
+                            })
+                            continue
+
                     content_blocks.append({
                         "type": block_type,
                         "source": {
@@ -1253,6 +1460,10 @@ class AgentEngine:
 
                         if isinstance(message, AssistantMessage):
                             _got_response_content = True
+                            # Capture model from assistant message (more reliable than config)
+                            msg_model = getattr(message, 'model', None)
+                            if msg_model:
+                                last_model = msg_model
                             # Extract parent_tool_use_id — set when this message
                             # comes from a sub-agent (Task) rather than the main agent
                             parent_id = getattr(message, 'parent_tool_use_id', None)
@@ -1339,6 +1550,12 @@ class AgentEngine:
                             if message.usage:
                                 last_usage = message.usage
                             sdk_session_id = message.session_id
+                            result_meta = {
+                                "total_cost_usd": getattr(message, "total_cost_usd", None),
+                                "duration_ms": getattr(message, "duration_ms", None),
+                                "duration_api_ms": getattr(message, "duration_api_ms", None),
+                                "num_turns": getattr(message, "num_turns", None),
+                            }
 
                 except asyncio.CancelledError:
                     raise  # propagate to outer handler
@@ -1409,13 +1626,44 @@ class AgentEngine:
         except Exception as e:
             error_msg = f"Agent error: {e}"
             logger.error(error_msg, exc_info=True)
-            await broadcaster.broadcast_error(session_id, str(e))
+
+            # --- Poisoned context detection (Layer 2 safety net) ---
+            # If the CLI's conversation history contains an unprocessable
+            # image or document, every subsequent API call re-sends it and
+            # gets 400.  The PreToolUse hook on Read (Layer 1) prevents
+            # most cases, but images can also enter via MCP tools, sub-
+            # agents, or the CLI's own internal processing.
+            # When detected: kill the CLI, clear sdk_session_id so the
+            # next turn starts a fresh conversation.
+            err_str = str(e)
+            is_poisoned = (
+                "Could not process image" in err_str
+                or "Could not process document" in err_str
+            )
+            if is_poisoned:
+                logger.warning(
+                    "Poisoned context detected for session %s: %s — "
+                    "killing CLI and clearing session to prevent loop",
+                    session_id[:8], err_str,
+                )
+                error_msg = (
+                    "The conversation contained an unprocessable image or "
+                    "document that caused the API to reject every request. "
+                    "The session has been reset to recover. The conversation "
+                    "context was lost — please re-state your request."
+                )
+                # Clear sdk_session_id so next turn creates a fresh CLI
+                await self.db.update_session_fields(
+                    session_id, {"sdk_session_id": None},
+                )
+
+            await broadcaster.broadcast_error(session_id, error_msg)
             # Memorize before discarding client
             await self._memorize_session(session_id)
             # Clear resume — CLI state may be corrupted after error
             unregister_handler(session_id)
             client = self.sessions.remove_client(session_id)
-            await self.sessions.mark_error(session_id, str(e))
+            await self.sessions.mark_error(session_id, error_msg)
             if client:
                 await self._safe_disconnect(client)
             full_response_text = error_msg
@@ -1475,20 +1723,60 @@ class AgentEngine:
 
         # Persist usage for context bar on session switch
         max_context = 1_048_576 if self.config.agent.context_1m else 200_000
+        num_turns = (result_meta or {}).get("num_turns") or 1
         if last_usage:
             usage_data = {
                 **last_usage,
                 "max_context_tokens": max_context,
+                "num_turns": num_turns,
             }
             session_record = await self.db.get_session(session_id)
             meta = json.loads(session_record.get("metadata") or "{}") if session_record else {}
             meta["last_usage"] = usage_data
             await self.db.update_session_metadata(session_id, meta)
 
+            # Extract server_tool_use counts
+            server_tool = last_usage.get("server_tool_use") or {}
+            web_search = server_tool.get("web_search_requests", 0)
+            web_fetch = server_tool.get("web_fetch_requests", 0)
+
+            # Use SDK-provided cost when available, otherwise estimate
+            from nerve.db.usage import estimate_turn_cost
+            sdk_cost = (result_meta or {}).get("total_cost_usd")
+            cost = sdk_cost if sdk_cost is not None else estimate_turn_cost(
+                last_usage, model=last_model,
+            )
+
+            # Persist per-turn usage to session_usage table
+            await self.db.record_turn_usage(
+                session_id=session_id,
+                input_tokens=last_usage.get("input_tokens", 0),
+                output_tokens=last_usage.get("output_tokens", 0),
+                cache_creation=last_usage.get("cache_creation_input_tokens", 0),
+                cache_read=last_usage.get("cache_read_input_tokens", 0),
+                max_context=max_context,
+                model=last_model,
+                cost_usd=cost,
+                duration_ms=(result_meta or {}).get("duration_ms"),
+                duration_api_ms=(result_meta or {}).get("duration_api_ms"),
+                num_turns=num_turns,
+                web_search_requests=web_search,
+                web_fetch_requests=web_fetch,
+            )
+
+            # Update total_cost_usd on the session
+            current_cost = (
+                session_record.get("total_cost_usd", 0) if session_record else 0
+            )
+            await self.db.update_session_fields(session_id, {
+                "total_cost_usd": (current_cost or 0) + cost,
+            })
+
         await broadcaster.broadcast_done(
             session_id,
             usage=last_usage,
             max_context_tokens=max_context,
+            num_turns=num_turns,
         )
         self.sessions.touch(session_id)
 
@@ -1753,50 +2041,37 @@ class AgentEngine:
     async def _generate_session_title(
         self, session_id: str, first_message: str,
     ) -> None:
-        """Generate a meaningful short title for a session using Haiku."""
+        """Generate a meaningful short title for a session using a fast model."""
         try:
-            import httpx
-            api_key = self.config.effective_api_key
-            if not api_key:
+            # Skip if no credentials are configured (neither API key nor Bedrock)
+            if not self.config.provider.is_bedrock and not self.config.effective_api_key:
                 return
 
-            base_url = self.config.anthropic_api_base_url
-            async with httpx.AsyncClient() as http_client:
-                resp = await http_client.post(
-                    f"{base_url}messages",
-                    headers={
-                        "x-api-key": api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": "claude-haiku-4-5-20251001",
-                        "max_tokens": 30,
-                        "messages": [{
-                            "role": "user",
-                            "content": (
-                                "Generate a short title (3-5 words, no quotes)"
-                                " for a conversation that starts with:\n\n"
-                                f"{first_message[:200]}"
-                            ),
-                        }],
-                    },
-                    timeout=10,
+            client = self.config.create_anthropic_client(timeout=10.0)
+            response = client.messages.create(
+                model=self.config.agent.title_model,
+                max_tokens=30,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Generate a short title (3-5 words, no quotes)"
+                        " for a conversation that starts with:\n\n"
+                        f"{first_message[:200]}"
+                    ),
+                }],
+            )
+            title = response.content[0].text.strip().strip('"\'').lstrip('#').strip()
+            if title and len(title) < 60:
+                await self.db.update_session_title(session_id, title)
+                await broadcaster.broadcast(session_id, {
+                    "type": "session_updated",
+                    "session_id": session_id,
+                    "title": title,
+                })
+                logger.info(
+                    "Generated title for session %s: %s",
+                    session_id, title,
                 )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    title = data["content"][0]["text"].strip().strip('"\'').lstrip('#').strip()
-                    if title and len(title) < 60:
-                        await self.db.update_session_title(session_id, title)
-                        await broadcaster.broadcast(session_id, {
-                            "type": "session_updated",
-                            "session_id": session_id,
-                            "title": title,
-                        })
-                        logger.info(
-                            "Generated title for session %s: %s",
-                            session_id, title,
-                        )
         except Exception as e:
             logger.warning("Failed to generate session title: %s", e)
 

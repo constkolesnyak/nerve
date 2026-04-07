@@ -15,10 +15,10 @@ const TAB_ICONS: Record<string, typeof Bot> = {
 };
 
 const TAB_COLORS: Record<string, string> = {
-  Plan: 'text-amber-400',
-  Explore: 'text-cyan-400',
-  'general-purpose': 'text-indigo-400',
-  files: 'text-teal-400',
+  Plan: 'text-hue-amber',
+  Explore: 'text-hue-cyan',
+  'general-purpose': 'text-link',
+  files: 'text-hue-teal',
 };
 
 function formatElapsed(startedAt: number, completedAt?: number): string {
@@ -53,30 +53,30 @@ function TabBar({ panels, activeId, onFocus, onClose }: {
   onClose: (id: string) => void;
 }) {
   return (
-    <div className="flex items-center border-b border-[#222] bg-[#0a0a0a] overflow-x-auto shrink-0">
+    <div className="flex items-center border-b border-border-subtle bg-bg-sunken overflow-x-auto shrink-0">
       {panels.map(tab => {
         const Icon = TAB_ICONS[tab.subagentType] || Bot;
-        const color = TAB_COLORS[tab.subagentType] || 'text-[#888]';
+        const color = TAB_COLORS[tab.subagentType] || 'text-text-muted';
         const isActive = tab.id === activeId;
         return (
           <button
             key={tab.id}
             onClick={() => onFocus(tab.id)}
-            className={`group flex items-center gap-1.5 px-3 py-2 text-[12px] border-r border-[#1a1a1a] shrink-0 transition-colors cursor-pointer ${
-              isActive ? 'bg-[#0c0c0c] text-[#ccc]' : 'text-[#666] hover:text-[#999] hover:bg-[#111]'
+            className={`group flex items-center gap-1.5 px-3 py-2 text-[12px] border-r border-surface-raised shrink-0 transition-colors cursor-pointer ${
+              isActive ? 'bg-bg-sunken text-text-secondary' : 'text-text-dim hover:text-text-muted hover:bg-surface-hover'
             }`}
           >
             {tab.status === 'running'
               ? <Loader2 size={11} className={`animate-spin ${color}`} />
-              : <Icon size={11} className={tab.isError ? 'text-red-400' : color} />
+              : <Icon size={11} className={tab.isError ? 'text-hue-red' : color} />
             }
             <span className="truncate max-w-[100px]">{tab.label}</span>
             {tab.status !== 'running' && tab.completedAt && (
-              <span className="text-[10px] text-[#555]">{formatElapsed(tab.startedAt, tab.completedAt)}</span>
+              <span className="text-[10px] text-text-faint">{formatElapsed(tab.startedAt, tab.completedAt)}</span>
             )}
             <span
               onClick={(e) => { e.stopPropagation(); onClose(tab.id); }}
-              className="ml-1 text-[#444] hover:text-[#999] opacity-0 group-hover:opacity-100 transition-opacity"
+              className="ml-1 text-text-faint hover:text-text-muted opacity-0 group-hover:opacity-100 transition-opacity"
             >
               <X size={10} />
             </span>
@@ -93,31 +93,31 @@ function TabBar({ panels, activeId, onFocus, onClose }: {
 
 function TabHeader({ tab, onClose }: { tab: PanelTab; onClose: () => void }) {
   const Icon = TAB_ICONS[tab.subagentType] || Bot;
-  const color = TAB_COLORS[tab.subagentType] || 'text-[#888]';
+  const color = TAB_COLORS[tab.subagentType] || 'text-text-muted';
 
   return (
-    <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#222] bg-[#0f0f0f] shrink-0">
+    <div className="flex items-center justify-between px-4 py-2.5 border-b border-border-subtle bg-bg shrink-0">
       <div className="flex items-center gap-2 min-w-0">
         {tab.status === 'running'
           ? <Loader2 size={14} className={`animate-spin shrink-0 ${color}`} />
-          : <Icon size={14} className={`shrink-0 ${tab.isError ? 'text-red-400' : color}`} />
+          : <Icon size={14} className={`shrink-0 ${tab.isError ? 'text-hue-red' : color}`} />
         }
-        <span className="text-[13px] font-medium text-[#ccc]">{tab.label}</span>
+        <span className="text-[13px] font-medium text-text-secondary">{tab.label}</span>
         {tab.description && (
-          <span className="text-[11px] text-[#555] truncate">{tab.description}</span>
+          <span className="text-[11px] text-text-faint truncate">{tab.description}</span>
         )}
         {tab.model && (
-          <span className="text-[10px] text-[#444] shrink-0">{tab.model}</span>
+          <span className="text-[10px] text-text-faint shrink-0">{tab.model}</span>
         )}
         {tab.status === 'running' && (
-          <span className="text-[10px] text-[#555] shrink-0">
+          <span className="text-[10px] text-text-faint shrink-0">
             <ElapsedTimer startedAt={tab.startedAt} />
           </span>
         )}
       </div>
       <button
         onClick={onClose}
-        className="w-6 h-6 flex items-center justify-center text-[#555] hover:text-[#999] rounded cursor-pointer transition-colors shrink-0"
+        className="w-6 h-6 flex items-center justify-center text-text-faint hover:text-text-muted rounded cursor-pointer transition-colors shrink-0"
       >
         <X size={14} />
       </button>
@@ -130,7 +130,7 @@ function TabHeader({ tab, onClose }: { tab: PanelTab; onClose: () => void }) {
 // ------------------------------------------------------------------ //
 
 function TabContent({ tab, containerRef }: { tab: PanelTab; containerRef: React.RefObject<HTMLDivElement | null> }) {
-  const cursorColor = tab.type === 'plan' ? 'bg-amber-400' : 'bg-indigo-400';
+  const cursorColor = tab.type === 'plan' ? 'bg-amber-400' : 'bg-link';
   const hasBlocks = tab.blocks.length > 0;
   const endRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
@@ -171,7 +171,7 @@ function TabContent({ tab, containerRef }: { tab: PanelTab; containerRef: React.
 
       {/* Separator between blocks and final content */}
       {hasBlocks && tab.content && (
-        <div className="border-t border-[#222] my-3" />
+        <div className="border-t border-border-subtle my-3" />
       )}
 
       {tab.content ? (
@@ -182,12 +182,12 @@ function TabContent({ tab, containerRef }: { tab: PanelTab; containerRef: React.
           )}
         </div>
       ) : tab.streaming && !hasBlocks ? (
-        <div className="flex items-center gap-2 text-[13px] text-[#666] pt-4">
+        <div className="flex items-center gap-2 text-[13px] text-text-dim pt-4">
           <Loader2 size={14} className="animate-spin" />
           {tab.type === 'plan' ? 'Planning...' : `${tab.label} working...`}
         </div>
       ) : !hasBlocks ? (
-        <div className="text-[13px] text-[#444]">No content</div>
+        <div className="text-[13px] text-text-faint">No content</div>
       ) : null}
 
       <div ref={endRef} />
@@ -229,11 +229,11 @@ function PlanActions({ tab }: { tab: PanelTab }) {
   };
 
   return (
-    <div className="flex items-center justify-end gap-2 px-4 py-2.5 border-t border-[#222] bg-[#0f0f0f] shrink-0">
+    <div className="flex items-center justify-end gap-2 px-4 py-2.5 border-t border-border-subtle bg-bg shrink-0">
       {isPlanExit && (
         <button
           onClick={handleDecline}
-          className="flex items-center gap-1.5 px-3 py-1 bg-[#1a1a22] hover:bg-[#252530] text-[#999] text-[12px] font-medium rounded-md cursor-pointer transition-colors"
+          className="flex items-center gap-1.5 px-3 py-1 bg-surface-raised hover:bg-surface-hover text-text-muted text-[12px] font-medium rounded-md cursor-pointer transition-colors"
         >
           <Ban size={12} />
           Decline
@@ -305,15 +305,15 @@ export function SidePanel() {
 
   return (
     <div
-      className={`side-panel flex flex-col bg-[#0c0c0c] shrink-0 relative overflow-hidden ${
-        isOpen ? 'border-l border-[#222]' : 'border-l-0'
+      className={`side-panel flex flex-col bg-bg-sunken shrink-0 relative overflow-hidden ${
+        isOpen ? 'border-l border-border-subtle' : 'border-l-0'
       } ${isDragging ? '' : 'transition-[width] duration-200'}`}
       style={{ width: isOpen ? `${panelWidth}%` : '0px' }}
     >
       {/* Resize handle */}
       <div
         onMouseDown={handleResizeStart}
-        className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/30 z-10"
+        className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-accent/30 z-10"
       />
 
       {/* Tab bar (when multiple tabs) */}

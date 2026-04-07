@@ -4,7 +4,7 @@ import { useChatStore } from '../../stores/chatStore';
 import type { QuoteAction, QuoteEntry } from '../../stores/chatStore';
 
 const ACTION_CONFIG: Record<QuoteAction, { icon: typeof Plus; label: string; color: string; placeholder: string }> = {
-  add:      { icon: Plus,       label: 'Add',     color: '#6366f1', placeholder: 'Instructions...' },
+  add:      { icon: Plus,       label: 'Add',     color: 'var(--theme-accent)', placeholder: 'Instructions...' },
   remove:   { icon: Trash2,     label: 'Remove',  color: '#ef4444', placeholder: 'Instructions...' },
   improve:  { icon: Sparkles,   label: 'Improve', color: '#a855f7', placeholder: 'Instructions...' },
   question: { icon: HelpCircle, label: 'Ask',     color: '#f59e0b', placeholder: 'What do you want to know?' },
@@ -90,7 +90,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
   };
 
   return (
-    <div className="border-t border-[#222] bg-[#0f0f0f] shrink-0">
+    <div className="border-t border-border-subtle bg-bg shrink-0">
       {/* Quote cards */}
       {quotes.length > 0 && (
         <div className="px-4 pt-3 pb-1">
@@ -120,7 +120,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
             placeholder={quotes.length > 0 ? 'Add context (optional)...' : 'Send a message...'}
             rows={1}
             disabled={disabled}
-            className="flex-1 px-4 py-3 bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl text-[15px] text-[#e0e0e0] outline-none focus:border-[#6366f1]/50 resize-none disabled:opacity-50 placeholder:text-[#444]"
+            className="flex-1 px-4 py-3 bg-surface-raised border border-border rounded-xl text-[15px] text-text outline-none focus:border-accent/50 resize-none disabled:opacity-50 placeholder:text-text-faint"
           />
           {isStreaming ? (
             <button
@@ -134,7 +134,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
             <button
               onClick={handleSend}
               disabled={!canSend}
-              className="w-10 h-10 bg-[#6366f1] hover:bg-[#818cf8] text-white rounded-xl flex items-center justify-center disabled:opacity-30 cursor-pointer transition-colors shrink-0"
+              className="w-10 h-10 bg-accent hover:bg-accent-hover text-white rounded-xl flex items-center justify-center disabled:opacity-30 cursor-pointer transition-colors shrink-0"
             >
               <Send size={18} />
             </button>
@@ -159,7 +159,7 @@ function QuoteCard({ quote, instructionRef, onRemove, onUpdateInstruction, onSen
 
   return (
     <div
-      className="quote-card rounded-lg bg-[#151515] border border-[#2a2a2a] overflow-hidden"
+      className="quote-card rounded-lg bg-surface border border-border overflow-hidden"
       style={{ borderLeftColor: config.color, borderLeftWidth: '3px' }}
     >
       <div className="flex items-start gap-2 px-3 py-2">
@@ -173,7 +173,7 @@ function QuoteCard({ quote, instructionRef, onRemove, onUpdateInstruction, onSen
 
         {/* Content */}
         <div className="flex-1 min-w-0">
-          <div className="text-[12px] text-[#888] leading-relaxed line-clamp-2">{truncated}</div>
+          <div className="text-[12px] text-text-muted leading-relaxed line-clamp-2">{truncated}</div>
           <input
             ref={instructionRef}
             type="text"
@@ -181,14 +181,14 @@ function QuoteCard({ quote, instructionRef, onRemove, onUpdateInstruction, onSen
             onChange={(e) => onUpdateInstruction(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && onSend) { e.preventDefault(); onSend(); } }}
             placeholder={config.placeholder}
-            className="w-full mt-1.5 px-0 py-0.5 bg-transparent text-[13px] text-[#ccc] outline-none placeholder:text-[#444] border-b border-[#2a2a2a] focus:border-[#555] transition-colors"
+            className="w-full mt-1.5 px-0 py-0.5 bg-transparent text-[13px] text-text-secondary outline-none placeholder:text-text-faint border-b border-border focus:border-border transition-colors"
           />
         </div>
 
         {/* Remove */}
         <button
           onClick={onRemove}
-          className="text-[#444] hover:text-[#999] cursor-pointer transition-colors shrink-0 pt-0.5"
+          className="text-text-faint hover:text-text-muted cursor-pointer transition-colors shrink-0 pt-0.5"
         >
           <X size={14} />
         </button>
