@@ -371,7 +371,7 @@ class AgentEngine:
             "## Step 3: Create Skills\n\n"
             "Use `skill_create` to create domain-specific skills the worker will need.\n"
             "Each skill should have clear step-by-step instructions for a procedure\n"
-            "(e.g., 'how to query the CI database', 'how to reproduce a test failure').\n\n"
+            "(e.g., 'how to query the monitoring API', 'how to debug a deployment failure').\n\n"
             "## Step 4: Configure Cron Jobs\n\n"
             "Set up monitoring cron jobs by editing `~/.nerve/cron/jobs.yaml`.\n"
             "This is the Nerve cron system — NOT the Anthropic SDK or system crontab.\n\n"
