@@ -1553,12 +1553,12 @@ async def skill_run_script(args: dict) -> dict:
         "with specific trigger phrases."
     ),
     {
-        "name": {"type": "string", "description": "Human-readable skill name (e.g. 'code-review', 'deploy-vox')"},
+        "name": {"type": "string", "description": "Human-readable skill name (e.g. 'code-review', 'deploy-app')"},
         "description": {
             "type": "string",
             "description": (
                 "Third-person description with trigger phrases. Example: "
-                "'This skill should be used when the user asks to \"deploy Vox\", "
+                "'This skill should be used when the user asks to \"deploy the app\", "
                 "\"push to staging\", or \"release a new version\".'"
             ),
         },

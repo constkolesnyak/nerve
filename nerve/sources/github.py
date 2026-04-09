@@ -278,7 +278,7 @@ class GitHubSource(Source):
 
             # Fetch recent human comments to catch mentions buried by bot
             # comments.  GitHub's latest_comment_url always points to the
-            # most recent comment — when a bot (e.g. clickhouse-gh[bot])
+            # most recent comment — when a bot (e.g. some-ci[bot])
             # posts after a human @mention, the mention is lost.
             reason = notif.get("reason", "")
             s_type = subject.get("type", "")

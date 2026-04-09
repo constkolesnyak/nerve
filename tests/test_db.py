@@ -397,9 +397,9 @@ class TestTaskSearch:
 
     async def test_search_multi_word_tokenized(self, db: Database):
         """Multi-word query should match tasks containing all words, not the exact phrase."""
-        await self._create_task(db, "t1", "Fix Google Workspace billing failure for example.com")
-        # "Google" and "Workspace" are both in the title — should match
-        results = await db.search_tasks("Google Workspace")
+        await self._create_task(db, "t1", "Fix database connection timeout on staging server")
+        # "database" and "connection" are both in the title — should match
+        results = await db.search_tasks("database connection")
         assert len(results) == 1
         assert results[0]["id"] == "t1"
 
@@ -407,11 +407,11 @@ class TestTaskSearch:
         """Words in the body content should be searchable, not just the title."""
         await self._create_task(
             db, "t1",
-            title="Fix Google Workspace billing failure",
-            content="Payment method Mastercard 8417 was declined. Update payment info.",
+            title="Fix database connection timeout on staging",
+            content="Connection pool exhausted after 100 concurrent requests. Increase pool size.",
         )
-        # "payment" is NOT in the title, but IS in the content
-        results = await db.search_tasks("payment")
+        # "pool" is NOT in the title, but IS in the content
+        results = await db.search_tasks("pool")
         assert len(results) == 1
         assert results[0]["id"] == "t1"
 
@@ -419,11 +419,11 @@ class TestTaskSearch:
         """Query with words split across title and content should match."""
         await self._create_task(
             db, "t1",
-            title="Fix Google Workspace billing failure",
-            content="Payment is failing on Mastercard.",
+            title="Fix database connection timeout on staging",
+            content="Connection pool is still exhausted intermittently.",
         )
-        # "Google" is in title, "payment" is in content
-        results = await db.search_tasks("Google payment")
+        # "database" is in title, "pool" is in content
+        results = await db.search_tasks("database pool")
         assert len(results) == 1
 
     async def test_search_status_filter(self, db: Database):
@@ -501,16 +501,16 @@ class TestTaskSearch:
 
     async def test_search_by_slug_substring(self, db: Database):
         """Partial slug should find the task."""
-        await self._create_task(db, "2026-03-10-azure-migration", "Azure eastus to centralus")
-        results = await db.search_tasks("azure-migration")
+        await self._create_task(db, "2026-03-10-cache-invalidation", "Redis cache TTL expiry fix")
+        results = await db.search_tasks("cache-invalidation")
         assert len(results) == 1
-        assert results[0]["id"] == "2026-03-10-azure-migration"
+        assert results[0]["id"] == "2026-03-10-cache-invalidation"
 
     async def test_search_slug_words_via_fts(self, db: Database):
         """Words from the slug should be searchable via FTS."""
-        await self._create_task(db, "2026-04-01-payment-failures", "Google billing issue")
-        # "payment" is only in the slug, not the title
-        results = await db.search_tasks("payment")
+        await self._create_task(db, "2026-04-01-flaky-tests", "CI pipeline reliability issue")
+        # "flaky" is only in the slug, not the title
+        results = await db.search_tasks("flaky")
         assert len(results) == 1
 
     async def test_search_deduplicates_across_strategies(self, db: Database):

@@ -276,11 +276,11 @@ Example 1: Filtering generic vs. project-specific knowledge
 
 Example 2: Work-specific data SHOULD be extracted
 ## Input
-[0] 2026-03-12T09:00:00 [assistant]: CI Monitor found 3 new issues: #1058 Connection pool exhaustion (Mar 11), #1057 Flaky pagination test (Mar 11), #1042 Missing index on users table (Mar 10). Also 2 integration tests consistently failing on NightlyBuilds.
+[0] 2026-03-12T09:00:00 [assistant]: CI found 3 new issues: #101 Widget alignment broken on mobile (Mar 11), #102 Timeout in CSV export endpoint (Mar 11), #103 Missing NOT NULL constraint on orders table (Mar 10). Also 2 integration tests consistently failing on the nightly pipeline.
 ## Output
 <item>
     <memory>
-        <content>CI Monitor tracked issues as of March 12, 2026: #1058 Connection pool exhaustion, #1057 Flaky pagination test, #1042 Missing index on users table, plus 2 consistently failing integration tests on NightlyBuilds</content>
+        <content>CI tracked issues as of March 12, 2026: #101 Widget alignment broken on mobile, #102 Timeout in CSV export endpoint, #103 Missing NOT NULL constraint on orders table, plus 2 consistently failing integration tests on nightly pipeline</content>
         <categories>
             <category>Work</category>
         </categories>
