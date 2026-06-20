@@ -2008,6 +2008,8 @@ class SetupWizard:
                 },
                 "github": {"enabled": self.choices.github_sync},
                 "github_events": {"enabled": self.choices.github_sync},
+                # Disabled by default — requires an explicit list of repos to watch.
+                "github_repos": {"enabled": False, "repos": []},
             }
 
         # Provider configuration
