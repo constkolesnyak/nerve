@@ -128,8 +128,16 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const addFiles = useCallback(async (files: File[]) => {
+    // Local id for React keys — no crypto strength needed.
+    // crypto.randomUUID is only available in secure contexts, which excludes
+    // self-signed TLS over Tailscale and plain HTTP, so we fall back to Math.random.
+    const localId = () =>
+      (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID()
+        : Math.random().toString(36).slice(2) + Date.now().toString(36);
+
     const newAttachments: AttachmentFile[] = files.map(file => ({
-      id: crypto.randomUUID(),
+      id: localId(),
       file,
       preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
       uploading: true,
