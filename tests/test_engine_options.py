@@ -1,15 +1,16 @@
-"""Tests for engine option helpers — thinking/effort selection per source.
+"""Tests for engine option helpers — OAuth-conditional thinking/effort cap.
 
 Regression for the issue where every cron run failed with
 ``API Error: 400 level "max" not supported, valid levels: low, medium, high``
 because the global ``effort=max`` / ``thinking=max`` settings were applied
-to cron sessions that run on ``cron_model`` (Sonnet) under Claude OAuth,
+to cron sessions running on ``cron_model`` (Sonnet) under Claude OAuth,
 which caps non-flagship models at ``high``.
 
-The fix introduces dedicated ``agent.cron_thinking`` / ``agent.cron_effort``
-fields and a ``_select_thinking_effort`` helper that picks the right pair
-based on ``source`` (``cron`` / ``hook`` get the cron overrides, everything
-else keeps the main settings).
+The fix downgrades ``thinking`` and ``effort`` to ``high`` for cron and
+hook sessions **only when OAuth is in use** (``config.proxy.enabled``).
+API users keep ``max`` for every session, and interactive sessions
+(web/Telegram/Discord/...) keep ``max`` even under OAuth — only the
+narrow OAuth+cron path is touched.
 """
 
 from __future__ import annotations
@@ -17,96 +18,126 @@ from __future__ import annotations
 import pytest
 
 from nerve.agent.engine import _select_thinking_effort
-from nerve.config import AgentConfig
+from nerve.config import AgentConfig, NerveConfig, ProxyConfig
 
 
-@pytest.fixture
-def agent_config() -> AgentConfig:
-    """Default AgentConfig — main = max, cron = high."""
-    return AgentConfig()
+def _make_config(
+    *,
+    thinking: str = "max",
+    effort: str = "max",
+    proxy_enabled: bool = False,
+) -> NerveConfig:
+    """Build a minimal NerveConfig for testing _select_thinking_effort.
+
+    Only the ``agent`` and ``proxy`` fields are read by the helper; the
+    rest can stay at their defaults.
+    """
+    return NerveConfig(
+        agent=AgentConfig(thinking=thinking, effort=effort),
+        proxy=ProxyConfig(enabled=proxy_enabled),
+    )
 
 
 class TestSelectThinkingEffort:
-    """``_select_thinking_effort`` routes settings by session source."""
+    """``_select_thinking_effort`` downgrades only when OAuth + cron/hook."""
 
-    def test_defaults_match_documented_values(self, agent_config: AgentConfig):
-        """Sanity check: the defaults are the ones the docs promise."""
-        assert agent_config.thinking == "max"
-        assert agent_config.effort == "max"
-        assert agent_config.cron_thinking == "high"
-        assert agent_config.cron_effort == "high"
-
-    @pytest.mark.parametrize("source", ["web", "telegram", "discord", "api", ""])
-    def test_interactive_sources_use_main_settings(
-        self, agent_config: AgentConfig, source: str,
-    ):
-        """Anything that isn't cron/hook keeps the main thinking/effort."""
-        thinking, effort = _select_thinking_effort(agent_config, source)
-        assert thinking == "max"
-        assert effort == "max"
+    # ------------------------------------------------------------------ #
+    #  OAuth on, cron-like source: must downgrade max -> high            #
+    # ------------------------------------------------------------------ #
 
     @pytest.mark.parametrize("source", ["cron", "hook"])
-    def test_cron_and_hook_use_cron_overrides(
-        self, agent_config: AgentConfig, source: str,
-    ):
-        """Cron and hook sessions must use ``cron_thinking`` / ``cron_effort``.
+    def test_oauth_caps_cron_max_to_high(self, source: str):
+        """The exact bug being fixed: OAuth + cron + max -> 'high'."""
+        config = _make_config(thinking="max", effort="max", proxy_enabled=True)
+        assert _select_thinking_effort(config, source) == ("high", "high")
 
-        This is the regression — the original code always passed
-        ``effort=max`` regardless of source, blocking every cron run.
-        """
-        thinking, effort = _select_thinking_effort(agent_config, source)
-        assert thinking == "high"
-        assert effort == "high"
-
-    def test_overrides_propagate_from_config(self):
-        """Custom values in AgentConfig are honored, not overwritten."""
-        config = AgentConfig(
-            thinking="medium",
-            effort="medium",
-            cron_thinking="low",
-            cron_effort="low",
+    @pytest.mark.parametrize("source", ["cron", "hook"])
+    def test_oauth_does_not_upgrade_lower_values(self, source: str):
+        """The cap is a max-only cap, not a forced value. Lower settings pass through."""
+        config = _make_config(
+            thinking="medium", effort="low", proxy_enabled=True,
         )
-        assert _select_thinking_effort(config, "web") == ("medium", "medium")
-        assert _select_thinking_effort(config, "cron") == ("low", "low")
-        assert _select_thinking_effort(config, "hook") == ("low", "low")
+        assert _select_thinking_effort(config, source) == ("medium", "low")
 
-    def test_main_and_cron_can_differ_independently(self):
-        """Cron settings don't have to mirror main settings."""
-        config = AgentConfig(
-            thinking="max", effort="max",
-            cron_thinking="medium", cron_effort="low",
+    @pytest.mark.parametrize("source", ["cron", "hook"])
+    def test_oauth_caps_individually(self, source: str):
+        """Each knob is capped independently if it's at 'max'."""
+        config = _make_config(
+            thinking="max", effort="medium", proxy_enabled=True,
         )
-        thinking_main, effort_main = _select_thinking_effort(config, "web")
-        thinking_cron, effort_cron = _select_thinking_effort(config, "cron")
-        assert (thinking_main, effort_main) == ("max", "max")
-        assert (thinking_cron, effort_cron) == ("medium", "low")
+        assert _select_thinking_effort(config, source) == ("high", "medium")
+
+        config = _make_config(
+            thinking="medium", effort="max", proxy_enabled=True,
+        )
+        assert _select_thinking_effort(config, source) == ("medium", "high")
+
+    # ------------------------------------------------------------------ #
+    #  OAuth on, interactive source: must NOT downgrade                  #
+    # ------------------------------------------------------------------ #
+
+    @pytest.mark.parametrize("source", ["web", "telegram", "discord", "api", ""])
+    def test_oauth_does_not_downgrade_interactive_sources(self, source: str):
+        """Interactive sessions run on agent.model (Opus by default) which
+        accepts max under OAuth. Don't touch them."""
+        config = _make_config(thinking="max", effort="max", proxy_enabled=True)
+        assert _select_thinking_effort(config, source) == ("max", "max")
+
+    # ------------------------------------------------------------------ #
+    #  OAuth off (API key): never downgrade — Artem's requirement        #
+    # ------------------------------------------------------------------ #
+
+    @pytest.mark.parametrize("source", ["cron", "hook", "web", "telegram", ""])
+    def test_api_users_never_downgraded(self, source: str):
+        """Without the local proxy (i.e. user has a real Anthropic API key),
+        every source keeps the configured value. This is exactly what Artem
+        asked for on ClickHouse/nerve#129 — don't change behavior for API
+        users."""
+        config = _make_config(thinking="max", effort="max", proxy_enabled=False)
+        assert _select_thinking_effort(config, source) == ("max", "max")
+
+    @pytest.mark.parametrize("source", ["cron", "hook"])
+    def test_api_users_keep_custom_values_for_cron(self, source: str):
+        """API users can pick any value for cron sessions too — no special
+        treatment."""
+        config = _make_config(
+            thinking="medium", effort="low", proxy_enabled=False,
+        )
+        assert _select_thinking_effort(config, source) == ("medium", "low")
+
+    # ------------------------------------------------------------------ #
+    #  Defaults sanity check                                             #
+    # ------------------------------------------------------------------ #
+
+    def test_defaults_match_documented_values(self):
+        """Defaults: max/max for everyone; no special cron knobs anymore."""
+        cfg = AgentConfig()
+        assert cfg.thinking == "max"
+        assert cfg.effort == "max"
+        # The cron_thinking / cron_effort knobs were removed — keep them
+        # gone so we don't reintroduce the unconditional downgrade.
+        assert not hasattr(cfg, "cron_thinking")
+        assert not hasattr(cfg, "cron_effort")
 
 
 class TestAgentConfigFromDict:
-    """``AgentConfig.from_dict`` accepts the new cron_* fields."""
+    """``AgentConfig.from_dict`` no longer reads cron_thinking/cron_effort."""
 
-    def test_omitted_cron_fields_default_to_high(self):
-        """Configs predating this fix still load — defaults kick in."""
-        config = AgentConfig.from_dict({})
-        assert config.cron_thinking == "high"
-        assert config.cron_effort == "high"
-
-    def test_cron_fields_are_loaded_from_dict(self):
-        config = AgentConfig.from_dict({
-            "cron_thinking": "medium",
-            "cron_effort": "low",
-        })
-        assert config.cron_thinking == "medium"
-        assert config.cron_effort == "low"
-
-    def test_main_settings_unaffected_by_cron_fields(self):
-        config = AgentConfig.from_dict({
+    def test_from_dict_ignores_legacy_cron_keys(self):
+        """Old configs with cron_thinking/cron_effort load cleanly — the
+        keys are silently ignored. Backwards-compatible: nothing crashes,
+        the keys just don't do anything anymore (their behavior moved to
+        the engine's OAuth check)."""
+        cfg = AgentConfig.from_dict({
             "thinking": "max",
             "effort": "max",
-            "cron_thinking": "low",
-            "cron_effort": "low",
+            "cron_thinking": "high",   # legacy, ignored
+            "cron_effort": "high",     # legacy, ignored
         })
-        assert config.thinking == "max"
-        assert config.effort == "max"
-        assert config.cron_thinking == "low"
-        assert config.cron_effort == "low"
+        assert cfg.thinking == "max"
+        assert cfg.effort == "max"
+
+    def test_from_dict_empty_uses_defaults(self):
+        cfg = AgentConfig.from_dict({})
+        assert cfg.thinking == "max"
+        assert cfg.effort == "max"

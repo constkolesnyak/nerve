@@ -70,27 +70,33 @@ except ImportError:
 
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
-def _select_thinking_effort(agent_config: Any, source: str) -> tuple[str, str]:
-    """Pick (thinking, effort) settings for a session based on its source.
+_OAUTH_CRON_CAP = "high"
 
-    Cron and hook sessions run on `cron_model` (typically Sonnet), which
-    under Claude OAuth (subscription) does not accept `level=max` for
-    thinking/effort and rejects requests with
-    `level "max" not supported, valid levels: low, medium, high`. Use
-    the dedicated `cron_*` overrides for those sources so cron jobs
-    don't get blocked while interactive sessions keep their full
-    thinking budget.
+
+def _select_thinking_effort(config: Any, source: str) -> tuple[str, str]:
+    """Pick (thinking, effort) for a session, downgrading only under OAuth.
+
+    Cron and hook sessions run on ``agent.cron_model`` (typically Sonnet).
+    Under Claude OAuth (subscription) Sonnet caps thinking/effort at
+    ``high`` and the CLI rejects ``max`` with::
+
+        API Error: 400 level "max" not supported, valid levels: low, medium, high
+
+    OAuth mode in nerve is gated by the local cli-proxy-api wrapping
+    the user's subscription credentials — i.e. ``config.proxy.enabled``.
+    When that's on AND the session is cron/hook, cap both knobs to
+    ``high``. API users (no proxy) and interactive sessions keep the
+    user's configured value unchanged — defaults stay ``max`` for
+    everyone, only the narrow OAuth+cron path is downgraded.
     """
-    is_cron_like = source in ("cron", "hook")
-    thinking_value = (
-        agent_config.cron_thinking if is_cron_like
-        else agent_config.thinking
-    )
-    effort_value = (
-        agent_config.cron_effort if is_cron_like
-        else agent_config.effort
-    )
-    return thinking_value, effort_value
+    thinking = config.agent.thinking
+    effort = config.agent.effort
+    if source in ("cron", "hook") and config.proxy.enabled:
+        if thinking == "max":
+            thinking = _OAUTH_CRON_CAP
+        if effort == "max":
+            effort = _OAUTH_CRON_CAP
+    return thinking, effort
 
 
 # Anthropic API image limits
@@ -992,7 +998,7 @@ class AgentEngine:
         # interactive → main settings), then cap each to what the resolved
         # model actually supports.
         thinking_value, effort_value = _select_thinking_effort(
-            self.config.agent, source,
+            self.config, source,
         )
         thinking_config = self._parse_thinking_config(
             thinking_value,

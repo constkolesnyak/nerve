@@ -1962,8 +1962,6 @@ class SetupWizard:
                 "max_concurrent": 4,
                 "thinking": "max",
                 "effort": "max",
-                "cron_thinking": "high",
-                "cron_effort": "high",
                 "context_1m": True,
             },
             "gateway": {

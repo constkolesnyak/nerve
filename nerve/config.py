@@ -138,15 +138,6 @@ class AgentConfig:
     max_concurrent: int = 4
     thinking: str = "max"       # max, high, medium, low, disabled, adaptive, or number (budget_tokens)
     effort: str = "max"         # max, xhigh, high, medium, low
-    # Cron / hook overrides — Claude OAuth (subscription) caps thinking budget
-    # for non-flagship models like Sonnet, rejecting effort/thinking="max" with
-    # `level "max" not supported, valid levels: low, medium, high`. Use a
-    # separate, lower setting for cron sessions (which run on `cron_model`)
-    # so cron jobs don't get blocked while keeping `effort=max` for the main
-    # interactive model.  (Note: upstream's _effective_effort also caps per
-    # model — this picks the *raw* level, capping happens downstream.)
-    cron_thinking: str = "high"
-    cron_effort: str = "high"
     context_1m: bool = True     # Enable 1M context window beta
     # Substrings of model names for which the context-1m beta header must NOT
     # be sent (some subscriptions reject the beta for specific models — e.g.
@@ -172,8 +163,6 @@ class AgentConfig:
             max_concurrent=d.get("max_concurrent", 4),
             thinking=str(d.get("thinking", "max")),
             effort=str(d.get("effort", "max")),
-            cron_thinking=str(d.get("cron_thinking", "high")),
-            cron_effort=str(d.get("cron_effort", "high")),
             context_1m=d.get("context_1m", True),
             context_1m_excluded_models=list(
                 d.get("context_1m_excluded_models", []) or []
