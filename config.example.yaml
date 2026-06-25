@@ -22,13 +22,11 @@ agent:
   max_concurrent: 4              # Max concurrent agent sessions
   thinking: max                  # Thinking budget for the main model
   effort: max                    # Reasoning effort for the main model
-  # Cron / hook sessions use the cron_model (Sonnet). Under Claude OAuth
-  # (subscription) Sonnet caps thinking budget and rejects "max" with
+  # Note: cron/hook sessions run on cron_model (Sonnet). Under Claude OAuth
+  # (subscription) Sonnet rejects thinking/effort="max" with
   #   level "max" not supported, valid levels: low, medium, high
-  # Keep these at "high" unless your provider accepts "max" for the
-  # cron model.
-  cron_thinking: high
-  cron_effort: high
+  # Nerve detects OAuth via `proxy.enabled` and automatically caps
+  # cron/hook sessions at "high" in that case. API users keep "max".
   # First-prompt rewrite — the web UI can refine the opening message of a
   # new chat with a fast model, preview it, and send only after approval.
   prompt_rewrite:
