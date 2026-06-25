@@ -1,9 +1,10 @@
-"""Monkey-patch for anyio 4.13.0 _deliver_cancellation hot-loop bug.
+"""Narrow monkey-patch for anyio 4.13.0 ``_deliver_cancellation`` zombie-scope
+hot-loop.
 
-Upstream bug (anyio 4.13.0, _backends/_asyncio.py:582-616):
+Upstream bug (anyio 4.13.0, ``_backends/_asyncio.py`` ~line 572-616)::
 
     for task in self._tasks:
-        should_retry = True          # ← set unconditionally
+        should_retry = True                 # ← set unconditionally
         if task._must_cancel:
             continue
         if task is not current and (task is self._host_task or _task_started(task)):
@@ -17,49 +18,44 @@ Upstream bug (anyio 4.13.0, _backends/_asyncio.py:582-616):
             self._deliver_cancellation, origin
         )
 
-``should_retry`` is set to True simply because there is *any* task in the
-scope's ``_tasks`` set, regardless of whether cancellation could actually be
-delivered. When every task in the scope is the *current* task (a scope that
-contains only itself, or a TaskGroup whose only live member is running the
-cancel) nothing gets ``task.cancel()``-ed, but the scheduler reschedules
-``_deliver_cancellation`` via ``call_soon`` on every event-loop tick. Result:
-one CPU core pinned at 100%, tens of thousands of ``epoll_pwait`` syscalls per
-second, and no forward progress.
+When a task lingers in ``CancelScope._tasks`` but cannot be cancelled
+(``task.done()`` is True — finished task whose ``task_done`` cleanup hasn't
+run yet) the upstream loop nevertheless sets ``should_retry=True`` and the
+scope re-arms ``call_soon(_deliver_cancellation)`` on every event-loop tick.
+Result: one CPU core pinned at ~100% with tens of thousands of
+``epoll_pwait`` syscalls per second and no forward progress.
 
-We have seen this trigger at least three times (April 22, 23, and 24, 2026).
-The SDK-side mitigation in ``nerve.agent.engine._safe_disconnect`` only runs
-during ``client.disconnect()``, so spins originating elsewhere (telegram
-polling, cron, an active SDK request hitting a broken pipe) are not covered.
+Observed live on 2026-04-24: three simultaneous zombie-scopes in one nerve
+process, each holding a single ``done=True`` task, ~55k epoll_pwait/sec
+combined (load 1.6, cpu-thermal 60°C). Diagnosed via ``py-spy dump`` and a
+GC scan of ``CancelScope`` instances.
 
-The fix below sets ``should_retry = True`` only when we *actually* called
-``task.cancel()`` on a task that could still receive a cancellation. We
-skip three categories of tasks that upstream blindly retries on:
+This patch is intentionally **as narrow as possible**: it adds a single
+``if task.done(): continue`` skip at the top of the loop body and is
+otherwise byte-for-byte identical to upstream anyio 4.13.0. Earlier wider
+patches that also skipped ``current_task()`` and ``_must_cancel`` were
+reverted (see ``ClickHouse/nerve#128``) because they broke legitimate
+anyio cancellation semantics:
 
-1. **Done tasks** (``task.done() is True``). Root cause of the April 24
-   regression: if a task completes while the scope has ``cancel_called``
-   and the scope never pops it out of ``_tasks``, every subsequent pass
-   sees ``_must_cancel=False`` (cleared when the task finished),
-   ``_task_started()=True``, ``_fut_waiter=None``. Our "waiter not done"
-   branch fires, ``task.cancel()`` is a no-op on a done task, and yet we
-   flagged ``should_retry=True`` anyway. Result: infinite ``call_soon``
-   on a scope whose only inhabitant is already a corpse. We observed
-   three such zombie-scopes running simultaneously, all spinning at
-   ~55k epoll_pwait/sec combined (100% CPU, load 1.6, 60°C).
+* **Deferred self-delivery**: ``with CancelScope() as s: s.cancel(); await
+  sleep(5)``. ``s.cancel()`` calls ``_deliver_cancellation`` synchronously
+  with ``current_task()`` pointing at the host task; anyio relies on the
+  ``call_soon`` reschedule to redeliver on the *next* tick (when
+  ``current_task()`` is ``None``) and actually cancel. Skipping the current
+  task without setting ``should_retry`` strands the cancel — the sleep
+  runs to completion.
 
-2. **Tasks already flagged with ``_must_cancel``**. asyncio's
-   ``Task.__step`` checks the flag when the task next resumes and will
-   raise ``CancelledError`` without our help. Retrying in that case means
-   we re-queue ourselves on every event-loop tick while the task is
-   blocked (shielded, awaiting I/O). This was the second iteration of
-   the bug (April 23 evening).
+* **Re-delivery after swallowed CancelledError**: anyio's contract is to
+  keep redelivering until the scope exits. Skipping tasks with
+  ``_must_cancel=True`` without ``should_retry=True`` strands tasks that
+  catch the first ``CancelledError`` and loop.
 
-3. **The current task**, because a task cannot cancel itself from inside
-   a callback. (``current_task()`` is often ``None`` here because the
-   callback runs from ``call_soon`` outside any task context — the check
-   is a belt-and-suspenders guard for the other case.)
+The done-task skip avoids both problems: ``should_retry`` is set
+unconditionally for every live (non-done) task, exactly like upstream, so
+deferred self-delivery and re-delivery still work. Only zombie tasks are
+elided.
 
-Import this module once, before anyio is used (i.e. very early in the
-process entry point — see ``nerve/__main__.py``).
+Import this module once, before anyio is used — see ``nerve/__init__.py``.
 """
 
 from __future__ import annotations
@@ -79,61 +75,47 @@ _APPLIED = False
 def _patched_deliver_cancellation(self, origin):  # type: ignore[no-untyped-def]
     """Drop-in replacement for ``CancelScope._deliver_cancellation``.
 
-    Semantics: ``should_retry`` is True **only when we actually called
-    ``task.cancel()`` on some task in this pass**. A task already flagged
-    with ``_must_cancel`` does not justify a retry — asyncio's
-    ``Task.__step`` checks the flag when the task next resumes and will
-    raise ``CancelledError`` without our help. Retrying in that case means
-    we re-queue ourselves on every event-loop tick while the task is
-    blocked (shielded, awaiting I/O, or — critically — is the *current
-    task* running this very callback), which is the hot loop we're trying
-    to kill.
+    Identical to anyio 4.13.0 except for one early ``continue`` on
+    ``task.done()`` — the zombie-scope skip. Every other branch matches
+    upstream so legitimate cancellation (deferred self-delivery,
+    re-delivery on swallowed CancelledError, task-group cancel, timer
+    cancel) keeps working unchanged.
     """
     should_retry = False
     current = current_task()
     for task in self._tasks:
-        # Already finished. anyio doesn't always remove tasks from
-        # ``_tasks`` before the scope's cancel callback fires (done
-        # tasks can linger until the task group unwinds). ``task.cancel()``
-        # is a no-op on a done task, so retrying is pure busy-loop.
-        # This is the root cause of the April 24, 2026 spin.
+        # ONLY deviation from upstream: a done task can never be
+        # cancelled (``task.cancel()`` is a no-op), so letting upstream
+        # set ``should_retry=True`` for it produces the zombie-scope
+        # hot-loop. Skip it before ``should_retry`` is touched.
         if task.done():
             continue
 
-        # The current task is running this callback; it can't cancel
-        # itself from inside it. Whatever state it's in (including
-        # ``_must_cancel``) will be handled once we return and control
-        # flows back to ``Task.__step``.
-        if task is current:
-            continue
-
-        # Already flagged for cancellation. asyncio will deliver the
-        # exception when the task resumes; no retry needed from us.
-        # (Upstream anyio 4.13.0 set should_retry=True here — that's the
-        # root-cause bug.)
+        should_retry = True
         if task._must_cancel:  # type: ignore[attr-defined]
             continue
 
         # The task is eligible for cancellation if it has started.
-        if task is self._host_task or _anyio_asyncio._task_started(task):
+        if task is not current and (
+            task is self._host_task
+            or _anyio_asyncio._task_started(task)
+        ):
             waiter = task._fut_waiter  # type: ignore[attr-defined]
             if not isinstance(waiter, asyncio.Future) or not waiter.done():
                 task.cancel(origin._cancel_reason)
-                # We actually delivered a cancel — re-check next tick.
-                should_retry = True
                 if (
                     task is origin._host_task
                     and origin._pending_uncancellations is not None
                 ):
                     origin._pending_uncancellations += 1
 
-    # Deliver cancellation to child scopes that aren't shielded or running
-    # their own cancellation callbacks.
+    # Deliver cancellation to child scopes that aren't shielded or
+    # running their own cancellation callbacks.
     for scope in self._child_scopes:
         if not scope._shield and not scope.cancel_called:
             should_retry = scope._deliver_cancellation(origin) or should_retry
 
-    # Schedule another callback only if we actually did work this pass.
+    # Schedule another callback if there are still tasks left.
     if origin is self:
         if should_retry:
             self._cancel_handle = get_running_loop().call_soon(
@@ -179,8 +161,8 @@ def apply() -> bool:
     cancel_scope_cls._deliver_cancellation = _patched_deliver_cancellation
     _APPLIED = True
     logger.info(
-        "anyio patch applied: CancelScope._deliver_cancellation fixed "
-        "(prevents 100%% CPU spin on unrecoverable cancel)"
+        "anyio patch applied: CancelScope._deliver_cancellation now skips "
+        "done tasks (prevents zombie-scope CPU spin)"
     )
     return True
 
