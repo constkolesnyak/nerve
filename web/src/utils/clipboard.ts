@@ -1,13 +1,16 @@
 /**
  * Copy text to clipboard with a fallback for non-secure contexts.
  *
- * `navigator.clipboard` is only defined in secure contexts (https, localhost).
- * Behind self-signed TLS on a Tailscale IP, plain HTTP, or a proxy without
- * a trusted cert, the entire `clipboard` object is undefined and any call
- * throws synchronously.
+ * `navigator.clipboard` is only exposed in *secure contexts* — HTTPS or
+ * `http://localhost`. When the app is accessed over plain HTTP via a LAN
+ * hostname or IP, or behind a proxy without a trusted cert, the entire
+ * `clipboard` object is `undefined` and any call throws synchronously.
  *
  * Falls back to the deprecated `document.execCommand('copy')` via a hidden
- * textarea — still works in every browser we care about.
+ * off-screen `<textarea>` — still works in every browser we care about.
+ *
+ * Mirrors the same non-secure-context fallback pattern already used in
+ * `utils/uuid.ts` for `crypto.randomUUID`.
  *
  * @returns true on success, false on failure.
  */

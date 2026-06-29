@@ -1,8 +1,9 @@
-import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ClipboardEvent, type DragEvent } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, type KeyboardEvent, type ClipboardEvent, type DragEvent } from 'react';
 import { Send, Square, X, Plus, Trash2, Sparkles, HelpCircle, StickyNote, Paperclip, FileText, Loader2 } from 'lucide-react';
 import { useChatStore } from '../../stores/chatStore';
 import type { QuoteAction, QuoteEntry } from '../../stores/chatStore';
 import { api } from '../../api/client';
+import { randomUUID } from '../../utils/uuid';
 import { PromptRewriteCard } from './PromptRewriteCard';
 
 const ACTION_CONFIG: Record<QuoteAction, { icon: typeof Plus; label: string; color: string; placeholder: string }> = {
@@ -55,8 +56,17 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
   const removeQuote = useChatStore(s => s.removeQuote);
   const updateQuoteInstruction = useChatStore(s => s.updateQuoteInstruction);
   const clearQuotes = useChatStore(s => s.clearQuotes);
+  const setDraft = useChatStore(s => s.setDraft);
   const activeSession = useChatStore(s => s.activeSession);
+  const ensureRealSession = useChatStore(s => s.ensureRealSession);
   const isNewChat = useChatStore(s => s.messages.length === 0);
+
+  // ── Model picker ──
+  const availableModels = useChatStore(s => s.availableModels);
+  const selectedModel = useChatStore(s => s.selectedModel);
+  const modelsDefault = useChatStore(s => s.modelsDefault);
+  const setSelectedModel = useChatStore(s => s.setSelectedModel);
+  const loadModels = useChatStore(s => s.loadModels);
 
   const [prevQuoteCount, setPrevQuoteCount] = useState(0);
 
@@ -76,6 +86,10 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
       .catch(() => setRewriteAvailable(false));
   }, []);
 
+  // Load selectable models once — the picker only renders when more than the
+  // default model is offered (i.e. local Ollama models are configured).
+  useEffect(() => { loadModels(); }, [loadModels]);
+
   useEffect(() => {
     localStorage.setItem(REWRITE_PREF_KEY, rewriteEnabled ? '1' : '0');
   }, [rewriteEnabled]);
@@ -91,6 +105,23 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
   useEffect(() => {
     cancelRewrite(false);
   }, [activeSession, cancelRewrite]);
+
+  // Load this chat's saved draft when switching sessions — an empty box for a
+  // chat with no draft, the unfinished text for one that has it. Reads via
+  // getState so a draft mutation (the keystrokes below) doesn't reload mid-edit.
+  // Focus the composer on every switch so you can start typing right away.
+  useEffect(() => {
+    setInput(useChatStore.getState().drafts[activeSession] ?? '');
+    if (activeSession) setTimeout(() => textareaRef.current?.focus(), 0);
+  }, [activeSession]);
+
+  // Keep the textarea height in sync with its content (typing + draft load).
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+  }, [input]);
 
   // Esc anywhere dismisses the preview (cancels an in-flight rewrite).
   useEffect(() => {
@@ -128,16 +159,8 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const addFiles = useCallback(async (files: File[]) => {
-    // Local id for React keys — no crypto strength needed.
-    // crypto.randomUUID is only available in secure contexts, which excludes
-    // self-signed TLS over Tailscale and plain HTTP, so we fall back to Math.random.
-    const localId = () =>
-      (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
-        ? crypto.randomUUID()
-        : Math.random().toString(36).slice(2) + Date.now().toString(36);
-
     const newAttachments: AttachmentFile[] = files.map(file => ({
-      id: localId(),
+      id: randomUUID(),
       file,
       preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
       uploading: true,
@@ -147,7 +170,12 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
 
     // Upload all files
     try {
-      const result = await api.uploadFiles(files, activeSession);
+      // A brand-new chat is only a client-side "virtual" session until its
+      // first message. The upload endpoint requires a persisted session, so
+      // materialize it first and upload against the real server id — otherwise
+      // the temp id 404s ("Session not found").
+      const sid = await ensureRealSession();
+      const result = await api.uploadFiles(files, sid);
       setAttachments(prev => prev.map(a => {
         const idx = newAttachments.findIndex(n => n.id === a.id);
         if (idx >= 0 && result.files[idx]) {
@@ -169,7 +197,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
         return a;
       }));
     }
-  }, [activeSession]);
+  }, [ensureRealSession]);
 
   const removeAttachment = useCallback((id: string) => {
     setAttachments(prev => {
@@ -216,6 +244,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
 
     onSend(message, fileIds.length > 0 ? fileIds : undefined, imageBlocks.length > 0 ? imageBlocks : undefined);
     setInput('');
+    setDraft(activeSession, '');
     clearQuotes();
     // Clean up previews
     attachments.forEach(a => { if (a.preview) URL.revokeObjectURL(a.preview); });
@@ -223,7 +252,6 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
     rewriteAbortRef.current?.abort();
     rewriteAbortRef.current = null;
     setRewrite({ status: 'idle' });
-    if (textareaRef.current) textareaRef.current.style.height = 'auto';
   };
 
   /** Request a rewrite and open the preview card. Sends nothing by itself. */
@@ -333,14 +361,6 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
     }
   };
 
-  const handleInput = () => {
-    const el = textareaRef.current;
-    if (el) {
-      el.style.height = 'auto';
-      el.style.height = Math.min(el.scrollHeight, 200) + 'px';
-    }
-  };
-
   return (
     <div
       className="border-t border-border-subtle bg-bg shrink-0 relative"
@@ -435,6 +455,34 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
               <Sparkles size={18} />
             </button>
           )}
+          {/* Model picker — only when more than one model is offered (local
+              Ollama models configured + available). Hidden otherwise so the
+              composer is unchanged for the default single-model setup. */}
+          {availableModels.length > 1 && (
+            <select
+              value={selectedModel ?? modelsDefault ?? ''}
+              onChange={(e) => setSelectedModel(e.target.value === modelsDefault ? null : e.target.value)}
+              disabled={disabled || isStreaming || rewriteActive}
+              title="Model for your next message"
+              className="h-10 max-w-[170px] px-2.5 bg-surface-raised border border-border rounded-xl text-[13px] text-text-secondary outline-none focus:border-accent/50 cursor-pointer shrink-0 disabled:opacity-30 truncate"
+            >
+              {availableModels.some(m => m.provider === 'anthropic') && (
+                <optgroup label="Anthropic">
+                  {availableModels.filter(m => m.provider === 'anthropic').map(m => (
+                    <option key={m.id} value={m.id}>{m.id}</option>
+                  ))}
+                </optgroup>
+              )}
+              {availableModels.some(m => m.provider === 'ollama') && (
+                <optgroup label="Ollama (local)">
+                  {availableModels.filter(m => m.provider === 'ollama').map(m => (
+                    <option key={m.id} value={m.id}>{m.id}</option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+          )}
+
           <input
             ref={fileInputRef}
             type="file"
@@ -451,7 +499,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled }: {
             id="nerve-chat-input"
             ref={textareaRef}
             value={input}
-            onChange={(e) => { setInput(e.target.value); handleInput(); }}
+            onChange={(e) => { setInput(e.target.value); setDraft(activeSession, e.target.value); }}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             placeholder={

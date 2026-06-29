@@ -35,7 +35,7 @@ export function ChatPage() {
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const {
-    sessions, activeSession, messages,
+    sessions, activeSession, virtualSession, messages,
     streamingBlocks, isStreaming, loading,
     agentStatus, contextUsage, currentTodos, currentCCTasks,
     sidebarCollapsed, panels,
@@ -119,6 +119,7 @@ export function ChatPage() {
 
   useKeyboardShortcuts(chatShortcuts);
 
+
   // Mirror the active session's title into the browser tab. Same cleaning
   // rules as the sidebar (strip leading '#' and 'Implement:' prefix).
   // Restored to plain "Nerve" when leaving the chat page or when there's
@@ -197,7 +198,9 @@ export function ChatPage() {
                 {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
               </button>
               <span className="font-medium text-[15px]">
-                {sessions.find(s => s.id === activeSession)?.title || activeSession}
+                {virtualSession?.id === activeSession
+                  ? 'New chat'
+                  : (sessions.find(s => s.id === activeSession)?.title || activeSession)}
               </span>
               {(() => {
                 const model = sessions.find(s => s.id === activeSession)?.model;

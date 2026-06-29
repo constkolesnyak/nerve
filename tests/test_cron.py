@@ -5,12 +5,18 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
 
 from nerve.cron.jobs import CronJob
-from nerve.cron.service import CronService, _parse_interval, _parse_timestamp
+from nerve.cron.service import (
+    CronService,
+    _crontab_to_trigger,
+    _parse_interval,
+    _parse_timestamp,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -47,10 +53,10 @@ def _make_cron_log(finished_at: str) -> dict:
     return {"job_id": "test-job", "finished_at": finished_at, "status": "success"}
 
 
-@pytest_asyncio.fixture
-async def cron_service():
+def _make_cron_service(timezone_name: str = "UTC") -> CronService:
     """Minimal CronService with mocked dependencies."""
     config = MagicMock()
+    config.timezone = timezone_name
     config.cron.system_file = MagicMock()
     config.cron.jobs_file = MagicMock()
     config.agent.cron_model = "test-model"
@@ -65,8 +71,13 @@ async def cron_service():
     db.log_cron_finish = AsyncMock()
     db.get_last_successful_cron_run = AsyncMock(return_value=None)
 
-    svc = CronService(config, engine, db)
-    return svc
+    return CronService(config, engine, db)
+
+
+@pytest_asyncio.fixture
+async def cron_service():
+    """Minimal CronService with mocked dependencies."""
+    return _make_cron_service()
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +130,94 @@ class TestParseInterval:
 
 
 # ---------------------------------------------------------------------------
+# Configured timezone
+# ---------------------------------------------------------------------------
+
+class TestConfiguredTimezone:
+    def test_scheduler_uses_configured_timezone(self):
+        svc = _make_cron_service("America/New_York")
+
+        assert str(svc.timezone) == "America/New_York"
+        assert str(svc.scheduler.timezone) == "America/New_York"
+
+
+# ---------------------------------------------------------------------------
+# _crontab_to_trigger: Unix day-of-week semantics
+# ---------------------------------------------------------------------------
+
+# A Saturday, so "next fire" lands on a distinct weekday for any DOW value.
+_DOW_BASE = datetime(2026, 6, 20, 0, 0, tzinfo=timezone.utc)
+
+
+def _fire_weekdays(schedule: str) -> set[str]:
+    """Collect the weekday abbreviations a crontab fires on within one week."""
+    trigger = _crontab_to_trigger(schedule)
+    end = _DOW_BASE + timedelta(days=8)
+    days: set[str] = set()
+    prev = None
+    cur = _DOW_BASE
+    while True:
+        fire = trigger.get_next_fire_time(prev, cur)
+        if fire is None or fire > end:
+            break
+        days.add(fire.strftime("%a"))
+        prev = fire
+        # Jump to the start of the next day so per-minute schedules don't loop.
+        cur = fire.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    return days
+
+
+class TestCrontabToTrigger:
+    def test_numeric_monday_fires_monday(self):
+        """The bug: Unix DOW 1 (Monday) was firing Tuesday via from_crontab."""
+        fire = _crontab_to_trigger("0 13 * * 1").get_next_fire_time(None, _DOW_BASE)
+        assert fire.strftime("%A") == "Monday"
+        assert (fire.hour, fire.minute) == (13, 0)
+
+    def test_numeric_sunday_fires_sunday(self):
+        fire = _crontab_to_trigger("0 13 * * 0").get_next_fire_time(None, _DOW_BASE)
+        assert fire.strftime("%A") == "Sunday"
+
+    def test_seven_also_means_sunday(self):
+        fire = _crontab_to_trigger("0 13 * * 7").get_next_fire_time(None, _DOW_BASE)
+        assert fire.strftime("%A") == "Sunday"
+
+    def test_range_weekdays_only(self):
+        assert _fire_weekdays("* * * * 1-5") == {"Mon", "Tue", "Wed", "Thu", "Fri"}
+
+    def test_list_monday_and_thursday(self):
+        assert _fire_weekdays("0 9 * * 1,4") == {"Mon", "Thu"}
+
+    def test_star_dow_fires_every_day(self):
+        assert _fire_weekdays("0 9 * * *") == {
+            "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun",
+        }
+
+    def test_day_name_passthrough(self):
+        """Already-named DOW values are left intact (and stay correct)."""
+        fire = _crontab_to_trigger("0 13 * * mon").get_next_fire_time(None, _DOW_BASE)
+        assert fire.strftime("%A") == "Monday"
+
+    @pytest.mark.parametrize(
+        "schedule",
+        ["0 5 * * *", "*/30 * * * *", "0 */4 * * *", "17 */4 * * *", "13 13 * * *"],
+    )
+    def test_non_dow_fields_match_from_crontab(self, schedule):
+        """Schedules without a numeric DOW behave exactly like from_crontab."""
+        from apscheduler.triggers.cron import CronTrigger
+
+        ours = _crontab_to_trigger(schedule).get_next_fire_time(None, _DOW_BASE)
+        ref = CronTrigger.from_crontab(schedule).get_next_fire_time(None, _DOW_BASE)
+        assert ours == ref
+
+    @pytest.mark.parametrize("schedule", ["4h", "30m", "1h30m", "???", ""])
+    def test_non_crontab_raises_value_error(self, schedule):
+        """Interval strings must still raise so the IntervalTrigger path runs."""
+        with pytest.raises(ValueError):
+            _crontab_to_trigger(schedule)
+
+
+# ---------------------------------------------------------------------------
 # _is_overdue
 # ---------------------------------------------------------------------------
 
@@ -156,6 +255,33 @@ class TestIsOverdue:
         job = _make_job(schedule="1h")
         last_run = _utc_now() - timedelta(hours=10)
         assert CronService._is_overdue(job, last_run, _utc_now()) is True
+
+    def test_crontab_uses_configured_timezone(self):
+        """Catch-up checks crontab fires in the configured timezone."""
+        job = _make_job(schedule="0 9 * * *")
+        last_run = datetime(2026, 1, 1, 13, 30, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 1, 14, 30, tzinfo=timezone.utc)
+
+        assert (
+            CronService._is_overdue(
+                job, last_run, now, ZoneInfo("America/New_York"),
+            )
+            is True
+        )
+        assert CronService._is_overdue(job, last_run, now, timezone.utc) is False
+
+    def test_weekly_overdue_after_exactly_one_week(self):
+        """A weekly Monday job is overdue one week later, not 6 or 8 days."""
+        job = _make_job(schedule="0 13 * * 1")  # Mondays 13:00 UTC
+        last_run = datetime(2026, 6, 15, 13, 0, tzinfo=timezone.utc)  # a Monday
+        # Six days later (Sunday): the next Monday fire has not arrived yet.
+        assert CronService._is_overdue(
+            job, last_run, last_run + timedelta(days=6),
+        ) is False
+        # Just past the next Monday fire, so now overdue.
+        assert CronService._is_overdue(
+            job, last_run, last_run + timedelta(days=7, minutes=1),
+        ) is True
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +333,26 @@ class TestMakeTrigger:
 
         from apscheduler.triggers.cron import CronTrigger
         assert isinstance(trigger, CronTrigger)
+
+    @pytest.mark.asyncio
+    async def test_crontab_uses_configured_timezone(self):
+        svc = _make_cron_service("America/Los_Angeles")
+
+        trigger = await svc._make_trigger(_make_job(schedule="30 11 * * *"))
+
+        from apscheduler.triggers.cron import CronTrigger
+        assert isinstance(trigger, CronTrigger)
+        assert str(trigger.timezone) == "America/Los_Angeles"
+
+    @pytest.mark.asyncio
+    async def test_interval_uses_configured_timezone(self):
+        svc = _make_cron_service("America/Los_Angeles")
+
+        trigger = await svc._make_trigger(_make_job(schedule="4h"))
+
+        from apscheduler.triggers.interval import IntervalTrigger
+        assert isinstance(trigger, IntervalTrigger)
+        assert str(trigger.timezone) == "America/Los_Angeles"
 
 
 # ---------------------------------------------------------------------------
@@ -452,13 +598,18 @@ def _hours_ahead(h: float) -> datetime:
     return _utc_now() + timedelta(hours=h)
 
 
-def _today_at_local(hour: int, minute: int = 0) -> datetime:
-    """Today's HH:MM in the local timezone, returned as UTC-aware datetime."""
-    local_tz = datetime.now().astimezone().tzinfo
-    today = datetime.now(local_tz).replace(
+def _today_at_utc(hour: int, minute: int = 0) -> datetime:
+    """Today's HH:MM as a UTC-aware datetime.
+
+    Matches the `cron_service` fixture, which configures `self.timezone = UTC`.
+    Service-side rotation math uses `now.astimezone(self.timezone)`, so tests
+    compute boundaries in the same timezone — independent of the host system
+    (CI may run in UTC, dev box in CEST, etc.).
+    """
+    today = datetime.now(timezone.utc).replace(
         hour=hour, minute=minute, second=0, microsecond=0,
     )
-    return today.astimezone(timezone.utc)
+    return today
 
 
 class TestMaybeRotateContext:
@@ -516,7 +667,7 @@ class TestMaybeRotateContext:
         """NULL last_rotated_at should not block first-time daily rotation
         once today's boundary has passed."""
         # rotate_at = 1h ago in local time → already past boundary today.
-        boundary_local_hour = (datetime.now().astimezone().hour - 1) % 24
+        boundary_utc_hour = (datetime.now(timezone.utc).hour - 1) % 24
         session = {
             "id": "cron:x",
             "connected_at": _hours_ago(0.1),  # connected just now
@@ -526,7 +677,7 @@ class TestMaybeRotateContext:
 
         rotated = await cron_service._maybe_rotate_context(
             "cron:x", rotate_hours=0,
-            rotate_at=f"{boundary_local_hour:02d}:00",
+            rotate_at=f"{boundary_utc_hour:02d}:00",
         )
         assert rotated is True
 
@@ -535,8 +686,8 @@ class TestMaybeRotateContext:
         self, cron_service,
     ):
         """Daily rotation must run at most once per day."""
-        boundary_local_hour = (datetime.now().astimezone().hour - 1) % 24
-        boundary_utc = _today_at_local(boundary_local_hour, 0)
+        boundary_utc_hour = (datetime.now(timezone.utc).hour - 1) % 24
+        boundary_utc = _today_at_utc(boundary_utc_hour, 0)
         # Already rotated AFTER today's boundary — should NOT rotate again.
         session = {
             "id": "cron:x",
@@ -547,7 +698,7 @@ class TestMaybeRotateContext:
 
         rotated = await cron_service._maybe_rotate_context(
             "cron:x", rotate_hours=0,
-            rotate_at=f"{boundary_local_hour:02d}:00",
+            rotate_at=f"{boundary_utc_hour:02d}:00",
         )
         assert rotated is False
         mark_idle.assert_not_called()
@@ -566,8 +717,8 @@ class TestMaybeRotateContext:
         With `last_rotated_at`, the connect timestamp is irrelevant: as long
         as we haven't rotated since today's boundary, rotation must fire.
         """
-        boundary_local_hour = (datetime.now().astimezone().hour - 1) % 24
-        boundary_utc = _today_at_local(boundary_local_hour, 0)
+        boundary_utc_hour = (datetime.now(timezone.utc).hour - 1) % 24
+        boundary_utc = _today_at_utc(boundary_utc_hour, 0)
         # connected_at reset to a moment AFTER today's boundary — exactly
         # the post-restart scenario that used to break rotation.
         session = {
@@ -580,7 +731,7 @@ class TestMaybeRotateContext:
 
         rotated = await cron_service._maybe_rotate_context(
             "cron:x", rotate_hours=0,
-            rotate_at=f"{boundary_local_hour:02d}:00",
+            rotate_at=f"{boundary_utc_hour:02d}:00",
         )
         assert rotated is True
 
@@ -589,7 +740,7 @@ class TestMaybeRotateContext:
         self, cron_service,
     ):
         """Before today's rotate_at boundary, must wait."""
-        boundary_local_hour = (datetime.now().astimezone().hour + 2) % 24
+        boundary_utc_hour = (datetime.now(timezone.utc).hour + 2) % 24
         session = {
             "id": "cron:x",
             "connected_at": _hours_ago(1),
@@ -599,7 +750,7 @@ class TestMaybeRotateContext:
 
         rotated = await cron_service._maybe_rotate_context(
             "cron:x", rotate_hours=0,
-            rotate_at=f"{boundary_local_hour:02d}:00",
+            rotate_at=f"{boundary_utc_hour:02d}:00",
         )
         assert rotated is False
         mark_idle.assert_not_called()
@@ -731,6 +882,57 @@ class TestRotationMemorize:
 
         assert rotated is False
         cron_service.engine.schedule_memorize.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rotate_at_uses_configured_timezone(self):
+        """Daily rotate_at uses config timezone, not the server timezone."""
+        svc = _make_cron_service("America/New_York")
+        svc.db.get_session = AsyncMock(return_value={
+            "connected_at": "2026-01-01T13:59:00+00:00",
+        })
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                fixed = datetime(2026, 1, 1, 15, 0, tzinfo=timezone.utc)
+                if tz is None:
+                    return fixed.replace(tzinfo=None)
+                return fixed.astimezone(tz)
+
+        with patch("nerve.cron.service.datetime", FixedDateTime):
+            rotated = await svc._maybe_rotate_context(
+                "cron:pers", rotate_hours=0, rotate_at="09:00",
+            )
+
+        assert rotated is True
+        svc.engine.schedule_memorize.assert_awaited_once_with("cron:pers")
+        svc.engine.sessions.mark_idle.assert_awaited_once_with(
+            "cron:pers", preserve_sdk_id=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_manual_rotation_forces_disabled_rotation_window(self, cron_service):
+        """Manual rotation clears context even when scheduled rotation is disabled."""
+        cron_service._jobs = [
+            _make_job(
+                id="pers", session_mode="persistent", context_rotate_hours=0,
+            ),
+        ]
+        cron_service.db.get_session = AsyncMock(return_value={
+            "connected_at": _hours_ago(1),
+            "sdk_session_id": "sdk-123",
+        })
+
+        result = await cron_service.rotate_session("pers")
+
+        assert result["rotated"] is True
+        assert result["session_age_hours"] is not None
+        cron_service.engine.schedule_memorize.assert_awaited_once_with(
+            "cron:pers",
+        )
+        cron_service.engine.sessions.mark_idle.assert_awaited_once_with(
+            "cron:pers", preserve_sdk_id=False,
+        )
 
 
 # ---------------------------------------------------------------------------
