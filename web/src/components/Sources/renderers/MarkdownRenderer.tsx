@@ -1,5 +1,6 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 
 interface Props {
   content: string;
@@ -12,7 +13,7 @@ export function MarkdownRenderer({ content, muted = false }: Props) {
       prose-headings:text-text prose-a:text-accent prose-code:text-text-secondary
       prose-pre:bg-surface prose-pre:border prose-pre:border-border-subtle
       ${muted ? 'text-text-muted' : 'text-text-secondary'}`}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
         {content || '*(empty)*'}
       </ReactMarkdown>
     </div>
