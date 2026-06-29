@@ -379,8 +379,7 @@ class CronService:
                 logger.warning("Invalid context_rotate_at: %s", rotate_at)
                 return False
 
-            local_tz = datetime.now().astimezone().tzinfo
-            today_rotate = datetime.now(local_tz).replace(
+            today_rotate = now.astimezone(self.timezone).replace(
                 hour=hour, minute=minute, second=0, microsecond=0,
             )
             today_rotate_utc = today_rotate.astimezone(timezone.utc)

@@ -598,13 +598,18 @@ def _hours_ahead(h: float) -> datetime:
     return _utc_now() + timedelta(hours=h)
 
 
-def _today_at_local(hour: int, minute: int = 0) -> datetime:
-    """Today's HH:MM in the local timezone, returned as UTC-aware datetime."""
-    local_tz = datetime.now().astimezone().tzinfo
-    today = datetime.now(local_tz).replace(
+def _today_at_utc(hour: int, minute: int = 0) -> datetime:
+    """Today's HH:MM as a UTC-aware datetime.
+
+    Matches the `cron_service` fixture, which configures `self.timezone = UTC`.
+    Service-side rotation math uses `now.astimezone(self.timezone)`, so tests
+    compute boundaries in the same timezone — independent of the host system
+    (CI may run in UTC, dev box in CEST, etc.).
+    """
+    today = datetime.now(timezone.utc).replace(
         hour=hour, minute=minute, second=0, microsecond=0,
     )
-    return today.astimezone(timezone.utc)
+    return today
 
 
 class TestMaybeRotateContext:
@@ -662,7 +667,7 @@ class TestMaybeRotateContext:
         """NULL last_rotated_at should not block first-time daily rotation
         once today's boundary has passed."""
         # rotate_at = 1h ago in local time → already past boundary today.
-        boundary_local_hour = (datetime.now().astimezone().hour - 1) % 24
+        boundary_utc_hour = (datetime.now(timezone.utc).hour - 1) % 24
         session = {
             "id": "cron:x",
             "connected_at": _hours_ago(0.1),  # connected just now
@@ -672,7 +677,7 @@ class TestMaybeRotateContext:
 
         rotated = await cron_service._maybe_rotate_context(
             "cron:x", rotate_hours=0,
-            rotate_at=f"{boundary_local_hour:02d}:00",
+            rotate_at=f"{boundary_utc_hour:02d}:00",
         )
         assert rotated is True
 
@@ -681,8 +686,8 @@ class TestMaybeRotateContext:
         self, cron_service,
     ):
         """Daily rotation must run at most once per day."""
-        boundary_local_hour = (datetime.now().astimezone().hour - 1) % 24
-        boundary_utc = _today_at_local(boundary_local_hour, 0)
+        boundary_utc_hour = (datetime.now(timezone.utc).hour - 1) % 24
+        boundary_utc = _today_at_utc(boundary_utc_hour, 0)
         # Already rotated AFTER today's boundary — should NOT rotate again.
         session = {
             "id": "cron:x",
@@ -693,7 +698,7 @@ class TestMaybeRotateContext:
 
         rotated = await cron_service._maybe_rotate_context(
             "cron:x", rotate_hours=0,
-            rotate_at=f"{boundary_local_hour:02d}:00",
+            rotate_at=f"{boundary_utc_hour:02d}:00",
         )
         assert rotated is False
         mark_idle.assert_not_called()
@@ -712,8 +717,8 @@ class TestMaybeRotateContext:
         With `last_rotated_at`, the connect timestamp is irrelevant: as long
         as we haven't rotated since today's boundary, rotation must fire.
         """
-        boundary_local_hour = (datetime.now().astimezone().hour - 1) % 24
-        boundary_utc = _today_at_local(boundary_local_hour, 0)
+        boundary_utc_hour = (datetime.now(timezone.utc).hour - 1) % 24
+        boundary_utc = _today_at_utc(boundary_utc_hour, 0)
         # connected_at reset to a moment AFTER today's boundary — exactly
         # the post-restart scenario that used to break rotation.
         session = {
@@ -726,7 +731,7 @@ class TestMaybeRotateContext:
 
         rotated = await cron_service._maybe_rotate_context(
             "cron:x", rotate_hours=0,
-            rotate_at=f"{boundary_local_hour:02d}:00",
+            rotate_at=f"{boundary_utc_hour:02d}:00",
         )
         assert rotated is True
 
@@ -735,7 +740,7 @@ class TestMaybeRotateContext:
         self, cron_service,
     ):
         """Before today's rotate_at boundary, must wait."""
-        boundary_local_hour = (datetime.now().astimezone().hour + 2) % 24
+        boundary_utc_hour = (datetime.now(timezone.utc).hour + 2) % 24
         session = {
             "id": "cron:x",
             "connected_at": _hours_ago(1),
@@ -745,7 +750,7 @@ class TestMaybeRotateContext:
 
         rotated = await cron_service._maybe_rotate_context(
             "cron:x", rotate_hours=0,
-            rotate_at=f"{boundary_local_hour:02d}:00",
+            rotate_at=f"{boundary_utc_hour:02d}:00",
         )
         assert rotated is False
         mark_idle.assert_not_called()
