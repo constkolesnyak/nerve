@@ -7,6 +7,7 @@ import { ChatInput } from '../components/Chat/ChatInput';
 import { ContextBar } from '../components/Chat/ContextBar';
 import { TodoPanel } from '../components/Chat/TodoPanel';
 import { SidePanel } from '../components/Chat/SidePanel';
+import { ChatWidthHandle } from '../components/Chat/ChatWidthHandle';
 import { BackgroundJobs } from '../components/Chat/BackgroundJobs';
 import { Loader2, PanelLeftOpen, PanelLeftClose, Files, ExternalLink } from 'lucide-react';
 import { api } from '../api/client';
@@ -120,7 +121,6 @@ export function ChatPage() {
 
   useKeyboardShortcuts(chatShortcuts);
 
-
   // Mirror the active session's title into the browser tab. Same cleaning
   // rules as the sidebar (strip leading '#' and 'Implement:' prefix).
   // Restored to plain "Nerve" when leaving the chat page or when there's
@@ -181,7 +181,6 @@ export function ChatPage() {
     if (virtualSession && virtualSession.id === activeSession) return;
     navigate(`/chat/${activeSession}`, { replace: true });
   }, [sessionId, activeSession, virtualSession, navigate]);
-
 
   const statusLabel = agentStatus.state === 'tool'
     ? `Using ${agentStatus.toolName}...`
@@ -271,15 +270,21 @@ export function ChatPage() {
             </div>
           </div>
 
-          {loading ? (
-            <div className="flex-1 flex items-center justify-center text-text-faint">Loading...</div>
-          ) : (
-            <MessageList
-              messages={messages}
-              streamingBlocks={streamingBlocks}
-              isStreaming={isStreaming}
-            />
-          )}
+          {/* Messages region: wraps the scrollable list so the width handle
+              anchors to the reading-column edge. The header and composer keep
+              their own full width. */}
+          <div className="relative flex-1 flex flex-col min-h-0">
+            {loading ? (
+              <div className="flex-1 flex items-center justify-center text-text-faint">Loading...</div>
+            ) : (
+              <MessageList
+                messages={messages}
+                streamingBlocks={streamingBlocks}
+                isStreaming={isStreaming}
+              />
+            )}
+            <ChatWidthHandle />
+          </div>
 
           <TodoPanel todos={currentTodos} ccTasks={currentCCTasks} />
 
