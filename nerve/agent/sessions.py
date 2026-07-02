@@ -271,6 +271,11 @@ class SessionManager:
         await self.db.set_channel_session(channel_key, session_id)
         logger.info("Channel %s -> session %s", channel_key, session_id)
 
+    async def clear_channel_session(self, channel_key: str) -> None:
+        """Drop the channel's session mapping so the next message mints a fresh one."""
+        await self.db.clear_channel_session(channel_key)
+        logger.info("Channel %s -> (cleared)", channel_key)
+
     # ------------------------------------------------------------------ #
     #  SDK client management                                               #
     # ------------------------------------------------------------------ #

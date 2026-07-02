@@ -410,6 +410,14 @@ class ChannelRouter:
             channel_key, session_id,
         )
 
+    async def clear_channel_session(self, channel_key: str) -> None:
+        """Clear the channel's session mapping (lazy-new pattern).
+
+        Next inbound message will fall through get_active_session's
+        fallback and mint a fresh session.
+        """
+        await self.engine.sessions.clear_channel_session(channel_key)
+
     async def create_session(
         self,
         channel_key: str,

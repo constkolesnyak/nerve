@@ -858,14 +858,21 @@ class TelegramChannel(BaseChannel):
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
     async def _handle_new_session(self, update: Update, context: Any) -> None:
-        """Handle /new [title] — stop current session, create and switch to a new one."""
+        """Handle /new — stop current session and defer creating a new one.
+
+        Matches the web panel's lazy "new chat" pattern (PR #136): no session
+        is minted up front. The next inbound message falls through
+        get_active_session and creates a fresh session then, using the first
+        message to seed the title.
+        """
         self._touch()
         if not self._is_authorized(update.effective_user.id):
             return
         chat_id = update.effective_chat.id
         channel_key = f"telegram:{chat_id}"
 
-        # Stop the current session before creating a new one
+        # Stop the current session so it frees its SDK client and stops
+        # capturing follow-up messages via the sticky window.
         prev = await self.router.get_last_session(channel_key)
         if prev:
             stopped = await self.router.engine.stop_session(prev)
@@ -875,13 +882,10 @@ class TelegramChannel(BaseChannel):
                     parse_mode=ParseMode.MARKDOWN,
                 )
 
-        title = " ".join(context.args) if context.args else None
-        session_id = await self.router.create_session(
-            channel_key, title=title, source="telegram",
-        )
+        # Drop the channel -> session mapping. Next message mints fresh.
+        await self.router.clear_channel_session(channel_key)
         await update.message.reply_text(
-            f"New session: `{session_id}`" + (f" — {title}" if title else ""),
-            parse_mode=ParseMode.MARKDOWN,
+            "New chat — send a message to start.",
         )
 
     async def _handle_stop(self, update: Update, context: Any) -> None:
