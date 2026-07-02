@@ -1,4 +1,8 @@
-"""V36: Backfill per-turn costs swallowed by SDK client recycling.
+"""V37: Backfill per-turn costs swallowed by SDK client recycling.
+
+(Renumbered from v036 upstream to v037 in the fork — v036 in this fork
+is `v036_notification_silences`, brought over in the 2026-06-18 sync
+before the fork's v030 `cache_ttl_split` offset propagated.)
 
 The Claude Agent SDK's ``ResultMessage.total_cost_usd`` is *cumulative*
 per CLI client process.  The engine derives per-turn cost by diffing

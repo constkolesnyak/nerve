@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from nerve.db import Database
-from nerve.db.migrations.v036_backfill_zero_cost_turns import up as v036_up
+from nerve.db.migrations.v037_backfill_zero_cost_turns import up as v036_up
 from nerve.db.usage import compute_turn_cost, estimate_turn_cost
 
 # A usage dict with real token traffic (estimate well above the backstop
