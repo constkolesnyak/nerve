@@ -215,6 +215,13 @@ class SessionStore:
         )
         await self.db.commit()
 
+    async def clear_channel_session(self, channel_key: str) -> None:
+        """Delete a channel-to-session mapping, if any."""
+        await self.db.execute(
+            "DELETE FROM channel_sessions WHERE channel_key = ?", (channel_key,),
+        )
+        await self.db.commit()
+
     # --- Session cleanup queries (V3) ---
 
     async def get_sessions_by_status(self, statuses: list[str]) -> list[dict]:
