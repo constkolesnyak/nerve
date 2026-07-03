@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -398,6 +399,13 @@ class AgentEngine:
         # Seeded from session metadata on client creation so detection
         # survives restarts without re-firing on every resume.
         self._observed_models: dict[str, str] = {}
+        # Sessions whose resume target had a dangling tool_use (an assistant
+        # turn interrupted mid-tool by a nerve restart). The transcript is
+        # healed before --resume so the CLI doesn't die on a malformed
+        # conversation; the flag tells _run_inner to prepend a restart-
+        # awareness note so the model knows it rebooted and must NOT blindly
+        # re-run the interrupted action (which caused re-restart loops).
+        self._resumed_after_interrupt: set[str] = set()
         self._router = None  # ChannelRouter — lazy-initialized via .router property
         self._mcp_servers_cache = list(config.mcp_servers)  # hot-reloadable
         self._claude_code_plugins: list[dict[str, str]] = []  # plugin dirs
@@ -1581,6 +1589,166 @@ class AgentEngine:
             )
             return True
 
+    def _resume_jsonl_path(self, sdk_session_id: str) -> str | None:
+        """Return the path to the resume target's conversation .jsonl, or
+        None if it can't be located. Mirrors the realpath/symlink resolution
+        used by ``_sdk_resume_file_exists``."""
+        try:
+            projects = os.path.expanduser("~/.claude/projects")
+            workspace = str(self.config.workspace)
+            bases = [os.path.realpath(workspace)]
+            if workspace not in bases:
+                bases.append(workspace)
+            for base in bases:
+                encoded = base.replace("/", "-")
+                jsonl = projects + "/" + encoded + "/" + sdk_session_id + ".jsonl"
+                if os.path.isfile(jsonl):
+                    return jsonl
+        except Exception as e:
+            logger.debug(
+                "Could not resolve resume jsonl path for %s: %s",
+                sdk_session_id[:12], e,
+            )
+        return None
+
+    def _heal_interrupted_transcript(self, sdk_session_id: str) -> bool:
+        """Repair a conversation transcript that was cut off mid-turn.
+
+        When ``nerve restart`` (or any hard shutdown) kills the daemon while
+        an SDK turn is in flight, the Claude Code .jsonl can end with an
+        ``assistant`` message containing ``tool_use`` blocks that never got a
+        matching ``user`` ``tool_result``. The Anthropic API rejects such a
+        conversation on ``--resume`` (every tool_use must be answered), so the
+        CLI dies on exit 1 and the session hangs — exactly the "sessions
+        always freeze after a restart" symptom.
+
+        This appends a synthetic ``user`` record supplying an error
+        ``tool_result`` for every unanswered ``tool_use`` id, making the
+        transcript valid again. Returns True if any healing was applied (i.e.
+        the session was interrupted mid-tool), False otherwise.
+
+        Best-effort: any parse/IO error returns False and leaves the file
+        untouched so we never corrupt a healthy transcript.
+        """
+        path = self._resume_jsonl_path(sdk_session_id)
+        if not path:
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                raw_lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+            if not raw_lines:
+                return False
+
+            records: list[dict[str, Any]] = []
+            dropped_garbage = False
+            for ln in raw_lines:
+                try:
+                    records.append(json.loads(ln))
+                except (ValueError, TypeError):
+                    # A truncated final line (partial flush on SIGTERM) —
+                    # drop it; --resume would choke on it too. We rewrite
+                    # the file cleanly below.
+                    dropped_garbage = True
+                    continue
+            if not records:
+                return False
+
+            # Collect every tool_use id and every answered tool_result id.
+            pending: dict[str, None] = {}  # ordered set of unanswered ids
+            answered: set[str] = set()
+            for rec in records:
+                msg = rec.get("message") or {}
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    continue
+                role = msg.get("role") or rec.get("type")
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type")
+                    if btype == "tool_use" and role == "assistant":
+                        bid = block.get("id")
+                        if bid:
+                            pending[bid] = None
+                    elif btype == "tool_result":
+                        rid = block.get("tool_use_id")
+                        if rid:
+                            answered.add(rid)
+
+            unanswered = [bid for bid in pending if bid not in answered]
+            if not unanswered:
+                return False
+
+            # Build the synthetic tool_result record, chaining parentUuid to
+            # the last record and copying environment fields from a prior
+            # record so Claude Code parses it like a native entry.
+            last = records[-1]
+            template = next(
+                (r for r in reversed(records) if r.get("type") == "user"),
+                last,
+            )
+            now_iso = (
+                datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            synthetic = {
+                "parentUuid": last.get("uuid"),
+                "isSidechain": False,
+                "userType": "external",
+                "cwd": template.get("cwd") or str(self.config.workspace),
+                "sessionId": sdk_session_id,
+                "version": template.get("version") or "2.1.150",
+                "gitBranch": template.get("gitBranch", ""),
+                "type": "user",
+                "uuid": str(uuid.uuid4()),
+                "timestamp": now_iso,
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": bid,
+                            "content": "[Interrupted by nerve restart]",
+                            "is_error": True,
+                        }
+                        for bid in unanswered
+                    ],
+                },
+            }
+            if dropped_garbage:
+                # A partial final line was present — rewrite the whole file
+                # from the parsed records (plus the heal) via an atomic
+                # temp-file swap so a crash mid-write can't corrupt it.
+                tmp = path + ".heal.tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    for rec in records:
+                        fh.write(json.dumps(rec) + "\n")
+                    fh.write(json.dumps(synthetic) + "\n")
+                os.replace(tmp, path)
+            else:
+                # Fast path: transcript is intact, just append the heal.
+                # Guard against a missing trailing newline first.
+                with open(path, "r+", encoding="utf-8") as fh:
+                    fh.seek(0, os.SEEK_END)
+                    if fh.tell() > 0:
+                        fh.seek(fh.tell() - 1)
+                        if fh.read(1) != "\n":
+                            fh.write("\n")
+                    fh.write(json.dumps(synthetic) + "\n")
+            logger.info(
+                "Healed interrupted transcript %s: supplied %d error "
+                "tool_result(s) for dangling tool_use block(s)",
+                sdk_session_id[:12], len(unanswered),
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "Transcript heal failed for %s: %s — leaving file untouched",
+                sdk_session_id[:12], e,
+            )
+            return False
+
     async def _get_or_create_client(
         self, session_id: str, source: str, model: str | None,
         fork_from: str | None = None,
@@ -1683,6 +1851,20 @@ class AgentEngine:
                     "Resuming session %s with SDK session %s",
                     session_id, sdk_resume_id[:12],
                 )
+                # Heal a transcript cut off mid-turn by a restart. If the
+                # last assistant turn had unanswered tool_use blocks, this
+                # supplies synthetic error tool_results so --resume doesn't
+                # die on a malformed conversation, and flags the session so
+                # the next turn tells the model it was interrupted (don't
+                # blindly re-run the interrupted action).
+                try:
+                    if self._heal_interrupted_transcript(sdk_resume_id):
+                        self._resumed_after_interrupt.add(session_id)
+                except Exception as _heal_err:
+                    logger.warning(
+                        "Transcript heal check failed for %s: %s",
+                        session_id, _heal_err,
+                    )
 
             # Pre-recall memories for new session context
             recalled_memories: list[str] = []
@@ -2854,6 +3036,24 @@ class AgentEngine:
             query_text = user_message
             if query_text and query_text.startswith("/"):
                 query_text = "\u200b" + query_text
+
+            # If this session was resumed after a restart interrupted its
+            # previous turn, prepend a one-time awareness note so the model
+            # knows it rebooted, doesn't assume the interrupted tool call
+            # finished, and doesn't blindly restart nerve again.
+            if session_id in self._resumed_after_interrupt:
+                self._resumed_after_interrupt.discard(session_id)
+                _note = (
+                    "[nerve restart notice] The nerve service was just "
+                    "restarted and your previous turn was interrupted "
+                    "mid-action \u2014 it did not finish. This conversation has "
+                    "been resumed with full prior context. Do NOT assume the "
+                    "interrupted tool call succeeded, and do NOT restart "
+                    "nerve again unless explicitly asked. Continue from here."
+                )
+                query_text = (
+                    _note + "\n\n" + query_text if query_text else _note
+                )
 
             # Build multi-modal content blocks once (reused on retry)
             if images:

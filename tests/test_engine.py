@@ -517,3 +517,143 @@ class TestServingModelTracking:
         assert st.ordered_blocks == []
         bc.broadcast_model_changed.assert_not_awaited()
         assert engine._observed_models["s1"] == "claude-opus-4-8-20260115"
+
+
+# ---------------------------------------------------------------------------
+# _heal_interrupted_transcript — repair a conversation cut off mid-tool by a
+# restart so --resume doesn't die on an unanswered tool_use.
+# ---------------------------------------------------------------------------
+
+
+def _heal_stub(tmp_jsonl):
+    """Build a minimal object exposing the two real methods under test,
+    with _resume_jsonl_path pinned to a temp file (isolating heal logic
+    from ~/.claude path resolution)."""
+    stub = SimpleNamespace(config=SimpleNamespace(workspace="/ws"))
+    stub._resume_jsonl_path = lambda sid: str(tmp_jsonl)
+    stub._heal_interrupted_transcript = (
+        AgentEngine._heal_interrupted_transcript.__get__(stub)
+    )
+    return stub
+
+
+def _asst_tooluse(uuid_, *ids):
+    return {
+        "type": "assistant",
+        "uuid": uuid_,
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": i, "name": "X", "input": {}}
+                for i in ids
+            ],
+        },
+    }
+
+
+def _user_result(uuid_, *ids):
+    return {
+        "type": "user",
+        "uuid": uuid_,
+        "cwd": "/ws",
+        "version": "2.1.150",
+        "gitBranch": "HEAD",
+        "message": {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": i, "content": "ok"}
+                for i in ids
+            ],
+        },
+    }
+
+
+def _write_jsonl(path, records):
+    import json
+    path.write_text("".join(json.dumps(r) + "\n" for r in records))
+
+
+def _read_jsonl(path):
+    import json
+    return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+
+
+def test_heal_dangling_tool_use(tmp_path):
+    import json
+    jsonl = tmp_path / "s.jsonl"
+    _write_jsonl(jsonl, [
+        _user_result("u0"),  # unrelated leading user turn (no tool_result)
+        _asst_tooluse("a1", "toolu_1"),  # interrupted: no result follows
+    ])
+    stub = _heal_stub(jsonl)
+    assert stub._heal_interrupted_transcript("s") is True
+    recs = _read_jsonl(jsonl)
+    last = recs[-1]
+    assert last["type"] == "user"
+    assert last["parentUuid"] == "a1"
+    blocks = last["message"]["content"]
+    assert blocks[0]["type"] == "tool_result"
+    assert blocks[0]["tool_use_id"] == "toolu_1"
+    assert blocks[0]["is_error"] is True
+    # Idempotent: now that it's answered, a second pass is a no-op.
+    assert stub._heal_interrupted_transcript("s") is False
+    assert _read_jsonl(jsonl) == recs
+
+
+def test_heal_parallel_tool_uses(tmp_path):
+    jsonl = tmp_path / "s.jsonl"
+    _write_jsonl(jsonl, [
+        _asst_tooluse("a1", "toolu_1", "toolu_2", "toolu_3"),
+    ])
+    stub = _heal_stub(jsonl)
+    assert stub._heal_interrupted_transcript("s") is True
+    blocks = _read_jsonl(jsonl)[-1]["message"]["content"]
+    ids = {b["tool_use_id"] for b in blocks}
+    assert ids == {"toolu_1", "toolu_2", "toolu_3"}
+
+
+def test_heal_clean_transcript_untouched(tmp_path):
+    jsonl = tmp_path / "s.jsonl"
+    _write_jsonl(jsonl, [
+        _asst_tooluse("a1", "toolu_1"),
+        _user_result("u1", "toolu_1"),  # answered — healthy
+    ])
+    stub = _heal_stub(jsonl)
+    before = jsonl.read_text()
+    assert stub._heal_interrupted_transcript("s") is False
+    assert jsonl.read_text() == before
+
+
+def test_heal_partial_parallel(tmp_path):
+    # One of two parallel tool_uses got answered before the crash; only the
+    # unanswered one should be supplied.
+    jsonl = tmp_path / "s.jsonl"
+    _write_jsonl(jsonl, [
+        _asst_tooluse("a1", "toolu_1", "toolu_2"),
+        _user_result("u1", "toolu_1"),
+    ])
+    stub = _heal_stub(jsonl)
+    assert stub._heal_interrupted_transcript("s") is True
+    blocks = _read_jsonl(jsonl)[-1]["message"]["content"]
+    assert [b["tool_use_id"] for b in blocks] == ["toolu_2"]
+
+
+def test_heal_missing_file_is_noop(tmp_path):
+    stub = SimpleNamespace(config=SimpleNamespace(workspace="/ws"))
+    stub._resume_jsonl_path = lambda sid: None
+    stub._heal_interrupted_transcript = (
+        AgentEngine._heal_interrupted_transcript.__get__(stub)
+    )
+    assert stub._heal_interrupted_transcript("s") is False
+
+
+def test_heal_tolerates_truncated_final_line(tmp_path):
+    # A hard SIGTERM can leave a half-written final line; heal should skip it
+    # and still repair the dangling tool_use from the complete records.
+    import json
+    jsonl = tmp_path / "s.jsonl"
+    good = json.dumps(_asst_tooluse("a1", "toolu_1")) + "\n"
+    jsonl.write_text(good + '{"type":"assistant","message":{"rol')  # truncated
+    stub = _heal_stub(jsonl)
+    assert stub._heal_interrupted_transcript("s") is True
+    assert _read_jsonl(jsonl)[-1]["message"]["content"][0]["tool_use_id"] == "toolu_1"
