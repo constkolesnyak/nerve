@@ -30,6 +30,20 @@ logger = logging.getLogger(__name__)
 # the granularity the model can request.
 _WAKEUP_SWEEP_SECONDS = 20
 
+# How often the auth-recovery watchdog probes for restored credentials while
+# there are jobs waiting to be re-fired. Kept short so a weekly cron that died
+# mid-run because tokens ran out re-fires within ~30s of the tokens returning,
+# instead of waiting for its next scheduled tick (which could be a week away).
+# The probe is skipped entirely when no jobs are queued, so this costs nothing
+# in the common case.
+_AUTH_RECOVERY_SWEEP_SECONDS = 30
+
+# Error-field prefix marking a cron run that failed specifically because the
+# auth provider was unavailable (proxy returned 503 / tokens exhausted). The
+# watchdog uses it both in-memory and to reconstruct its retry queue from
+# cron_logs across a service restart.
+_AUTH_FAILURE_MARKER = "[auth_unavailable]"
+
 # ScheduleWakeup autonomous-loop sentinels (Claude Code /loop). Nerve has no
 # /loop command, so resolve them to a plain continuation instruction.
 _WAKEUP_SENTINELS = {"<<autonomous-loop>>", "<<autonomous-loop-dynamic>>"}
@@ -151,6 +165,15 @@ class CronService:
         self._jobs: list[CronJob] = []
         self._source_runners: list[SourceRunner] = []
         self._job_locks: dict[str, asyncio.Lock] = {}
+        # Jobs whose last run failed because auth was unavailable. The
+        # auth-recovery sweep re-fires every job in this set the instant the
+        # proxy reports healthy again, so a job with a weekly schedule does not
+        # have to wait until next week after a mid-run token outage.
+        self._auth_retry_jobs: set[str] = set()
+        # Edge-trigger guard for the "tokens gone" alert: set when we send it,
+        # cleared on recovery, so a multi-job outage produces ONE token-down
+        # notification (plus one token-restored), not one per failing job.
+        self._auth_down_notified: bool = False
 
     async def start(self) -> None:
         """Load jobs and start the scheduler."""
@@ -239,6 +262,22 @@ class CronService:
             name="Fire due session wakeups",
             replace_existing=True,
         )
+
+        # Re-fire jobs the instant auth is restored. Only probes the proxy
+        # when jobs are actually queued, so it is free when nothing is waiting.
+        self.scheduler.add_job(
+            self._auth_recovery_sweep,
+            IntervalTrigger(
+                seconds=_AUTH_RECOVERY_SWEEP_SECONDS, timezone=self.timezone,
+            ),
+            id="auth_recovery_sweep",
+            name="Re-fire cron jobs when auth is restored",
+            replace_existing=True,
+        )
+
+        # Rebuild the auth-retry queue from cron logs so an outage that spans a
+        # restart still gets its jobs re-fired once tokens return.
+        await self._reconstruct_auth_retry_jobs()
 
         self.scheduler.start()
         logger.info(
@@ -591,21 +630,263 @@ class CronService:
                     run_id=run_id,
                 )
 
-            # Keep the tail of the response — for multi-message runs the
-            # final summary lives at the end, not the beginning.
-            output = response if len(response) <= 2000 else "…" + response[-2000:]
-            if rotated:
-                output = "[context rotated] " + output
-            await self.db.log_cron_finish(
-                log_id, "success", output=output, session_id=session_id,
-            )
-            logger.info("Cron job %s completed (%d chars)", job.id, len(response))
+            # engine.run() does NOT raise on an auth/agent failure — it catches
+            # the error internally and returns it as the response string. So the
+            # returned string, not an exception, is the reliable success signal.
+            # A run that "succeeded" with an error sentinel must be treated as a
+            # failure, otherwise its cursor buffer would already have been
+            # committed and the emails silently lost.
+            if AgentEngine._run_failed(response):
+                await self._handle_failed_run(
+                    job, log_id, session_id, response,
+                )
+            else:
+                # Real success — clear any prior auth-failure marker so the
+                # watchdog stops tracking this job.
+                self._auth_retry_jobs.discard(job.id)
+                # Keep the tail of the response — for multi-message runs the
+                # final summary lives at the end, not the beginning.
+                output = (
+                    response if len(response) <= 2000 else "…" + response[-2000:]
+                )
+                if rotated:
+                    output = "[context rotated] " + output
+                await self.db.log_cron_finish(
+                    log_id, "success", output=output, session_id=session_id,
+                )
+                logger.info(
+                    "Cron job %s completed (%d chars)", job.id, len(response),
+                )
 
         except Exception as e:
             logger.error("Cron job %s failed: %s", job.id, e, exc_info=True)
-            await self.db.log_cron_finish(
-                log_id, "error", error=str(e), session_id=session_id,
+            await self._handle_failed_run(
+                job, log_id, session_id, f"Agent error: {e}",
             )
+
+    # -- Auth-recovery watchdog --------------------------------------------
+
+    async def _handle_failed_run(
+        self,
+        job: CronJob,
+        log_id: int,
+        session_id: str | None,
+        error_text: str,
+    ) -> None:
+        """Log a failed cron run and, if auth is the cause, queue it to re-fire.
+
+        Probes the proxy for ground-truth auth availability. When auth is
+        down, the job is added to ``_auth_retry_jobs`` and its logged error is
+        prefixed with ``_AUTH_FAILURE_MARKER`` so the queue can be rebuilt from
+        cron_logs after a restart. Non-auth failures are logged as plain
+        errors and left to their normal schedule.
+        """
+        status = "error"
+        error = error_text
+        auth_down = not await self._auth_available()
+        if auth_down:
+            self._auth_retry_jobs.add(job.id)
+            error = f"{_AUTH_FAILURE_MARKER} {error_text}"
+            logger.warning(
+                "Cron job %s failed with auth unavailable — queued for "
+                "immediate re-fire when tokens return", job.id,
+            )
+        else:
+            logger.error("Cron job %s failed: %s", job.id, error_text)
+        await self.db.log_cron_finish(
+            log_id, status, error=error, session_id=session_id,
+        )
+        await self._notify_run_failure(job, error_text, auth_down)
+
+    async def _notify_system(
+        self, title: str, body: str, priority: str = "high",
+    ) -> None:
+        """Push an operational alert to the user's channels (Telegram + web).
+
+        Best-effort: a missing/none notification service or a delivery error
+        never propagates into the cron run. Uses the ``system`` session so the
+        message is not tied to any one cron chat.
+        """
+        svc = getattr(self.engine, "notification_service", None)
+        if svc is None:
+            return
+        try:
+            await svc.send_notification(
+                session_id="system", title=title, body=body, priority=priority,
+            )
+        except Exception as e:
+            logger.warning("Failed to send cron system notification: %s", e)
+
+    @staticmethod
+    def _plural_cron(n: int) -> str:
+        """Russian plural for 'крон' (1 крон / 2 крона / 5 кронов)."""
+        if 11 <= n % 100 <= 14:
+            return "кронов"
+        last = n % 10
+        if last == 1:
+            return "крон"
+        if 2 <= last <= 4:
+            return "крона"
+        return "кронов"
+
+    async def _notify_run_failure(
+        self, job: CronJob, error_text: str, auth_down: bool,
+    ) -> None:
+        """Alert on a failed cron run.
+
+        Auth outages are edge-triggered into a single "tokens gone" alert per
+        outage (the restored alert lists what gets re-fired), so a wave of
+        jobs failing on the same outage does not spam. Any other failure —
+        a real bug in a job — sends a per-job error alert every time, which is
+        what the user asked for ("notifications about all cron errors").
+        """
+        if auth_down:
+            if self._auth_down_notified:
+                return
+            self._auth_down_notified = True
+            await self._notify_system(
+                title="Токены кончились — кроны на паузе",
+                body=(
+                    f"🍁 Крон {job.id} не смог отработать: провайдер вернул "
+                    "503 (нет доступных токенов)\n"
+                    "🌿 Письма и данные не потеряны — курсоры не сдвинуты\n"
+                    "🌿 Перезапущу автоматически, как только токены вернутся"
+                ),
+                priority="urgent",
+            )
+            return
+
+        snippet = error_text.strip()
+        if len(snippet) > 400:
+            snippet = snippet[:400] + "…"
+        await self._notify_system(
+            title=f"Крон {job.id} упал с ошибкой",
+            body=f"🍁 {snippet}",
+            priority="high",
+        )
+
+    async def _auth_available(self) -> bool:
+        """Ground-truth check: can the agent actually get a completion?
+
+        ``ProxyService.is_healthy`` only confirms the proxy process answers
+        ``/v1/models`` — it stays green while the underlying OAuth token is
+        dead. Here we send a minimal ``/v1/messages`` completion; a 503 means
+        no credentials are available. Any non-503 response (including auth-
+        unrelated 4xx) proves the credential path is live.
+
+        When the proxy is disabled Nerve talks to Anthropic directly and we
+        have no cheap local probe, so we optimistically return True — the job
+        will simply fail again and re-queue if the real API is down.
+        """
+        if not self.config.proxy.enabled:
+            return True
+        try:
+            import httpx
+
+            url = (
+                f"http://{self.config.proxy.host}:"
+                f"{self.config.proxy.port}/v1/messages"
+            )
+            payload = {
+                "model": self.config.agent.cron_model,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}],
+            }
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    url,
+                    headers={
+                        "x-api-key": self.config.proxy.api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json=payload,
+                    timeout=10,
+                )
+            return resp.status_code != 503
+        except Exception:
+            # Network error / proxy down — treat as unavailable so we keep the
+            # job queued and retry on the next sweep.
+            return False
+
+    async def _auth_recovery_sweep(self) -> None:
+        """Re-fire queued jobs the moment auth is restored.
+
+        No-op when nothing is queued (the common case), so the periodic sweep
+        costs a set-emptiness check and nothing else. Only when jobs are
+        waiting does it spend a probe; on the dead→healthy edge it drains the
+        whole queue at once so weekly crons recover in seconds, not days.
+        """
+        if not self._auth_retry_jobs:
+            return
+        if not await self._auth_available():
+            return
+
+        queued = list(self._auth_retry_jobs)
+        self._auth_retry_jobs.clear()
+        jobs_by_id = {j.id: j for j in self._jobs}
+        logger.info("Auth restored — re-firing %d queued cron jobs: %s",
+                    len(queued), queued)
+        fired: list[str] = []
+        for job_id in queued:
+            job = jobs_by_id.get(job_id)
+            if job is None or not job.enabled:
+                continue
+            asyncio.create_task(self._run_job_wrapper(job))
+            fired.append(job_id)
+
+        # Clear the outage flag so the next token-down failure alerts again,
+        # and tell the user which crons we just brought back.
+        self._auth_down_notified = False
+        if fired:
+            lines = "\n".join(f"🌿 {jid}" for jid in fired)
+            await self._notify_system(
+                title="Токены вернулись — перезапускаю кроны",
+                body=(
+                    f"🍁 Перезапускаю {len(fired)} "
+                    f"{self._plural_cron(len(fired))}:\n{lines}"
+                ),
+                priority="high",
+            )
+
+    async def _reconstruct_auth_retry_jobs(self) -> None:
+        """Rebuild the auth-retry queue from cron logs after a restart.
+
+        An outage can span a service restart: the job failed with tokens down,
+        then Nerve restarted before they came back. Without this, the in-memory
+        queue would be empty and the job would wait for its next tick. We scan
+        each enabled job's most recent finished run and re-queue any whose
+        error carries the auth-failure marker.
+        """
+        for job in self._jobs:
+            if not job.enabled:
+                continue
+            try:
+                last = await self.db.get_last_cron_run(job.id)
+            except Exception as e:
+                logger.warning(
+                    "Failed to read last run for %s during auth-retry "
+                    "reconstruction: %s", job.id, e,
+                )
+                continue
+            if (
+                last
+                and last.get("status") == "error"
+                and (last.get("error") or "").startswith(_AUTH_FAILURE_MARKER)
+            ):
+                self._auth_retry_jobs.add(job.id)
+        if self._auth_retry_jobs:
+            # We restarted mid-outage: tokens were already down before this
+            # process started, so suppress a duplicate "tokens gone" alert.
+            # The recovery sweep will send the "tokens back" alert and reset
+            # this flag once auth returns.
+            self._auth_down_notified = True
+            logger.info(
+                "Reconstructed auth-retry queue from logs: %s",
+                sorted(self._auth_retry_jobs),
+            )
+
+    # -- End auth-recovery watchdog ----------------------------------------
 
     async def _run_source_wrapper(self, runner: SourceRunner) -> None:
         """Wrapper to run a source ingestion with cron and source logging."""

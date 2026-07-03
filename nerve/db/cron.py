@@ -84,6 +84,23 @@ class CronStore:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
+    async def get_last_cron_run(self, job_id: str) -> dict | None:
+        """Get the most recent *finished* cron_logs entry for a job, any status.
+
+        Unlike ``get_last_successful_cron_run`` this returns the latest run
+        regardless of outcome. Used by the auth-recovery watchdog to
+        reconstruct its retry queue on startup: a job whose last finished run
+        errored with the auth-failure marker must be re-fired the moment
+        tokens return, even across a service restart.
+        """
+        async with self.db.execute(
+            "SELECT * FROM cron_logs WHERE job_id = ? AND finished_at IS NOT NULL "
+            "ORDER BY finished_at DESC, id DESC LIMIT 1",
+            (job_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
     async def get_latest_cron_session_id(self, job_id: str) -> str | None:
         """Return the most recently active session id for a cron job.
 

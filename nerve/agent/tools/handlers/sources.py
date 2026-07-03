@@ -31,6 +31,23 @@ _UNTRUSTED_DATA_WARNING = (
 )
 
 
+async def _advance_cursor(
+    ctx: ToolContext, consumer: str, source: str, max_seq: int, ttl: int,
+) -> None:
+    """Advance a consumer cursor — deferred for cron sessions, inline otherwise.
+
+    Cron sessions (inbox-processor et al.) must not mark source messages
+    "read" until the run finishes cleanly, otherwise a mid-run auth failure
+    silently loses emails. For those the advance is buffered on the engine
+    and committed/discarded by the cron run methods. User sessions commit
+    immediately — there is no run boundary to flush them.
+    """
+    if ctx.engine is not None and ctx.engine.cursor_is_deferred(ctx.session_id):
+        ctx.engine.buffer_cursor(ctx.session_id, consumer, source, max_seq, ttl)
+    else:
+        await ctx.db.set_consumer_cursor(consumer, source, max_seq, ttl_days=ttl)
+
+
 def _format_relative_time(iso_ts: str) -> str:
     """Format ISO timestamp as relative time (e.g., '2h ago')."""
     try:
@@ -195,7 +212,7 @@ async def poll_source_handler(ctx: ToolContext, args: dict) -> ToolResult:
 
     max_seq = max(m["rowid"] for m in messages)
     ttl = ctx.config.sync.consumer_cursor_ttl_days if ctx.config else 2
-    await ctx.db.set_consumer_cursor(consumer, source, max_seq, ttl_days=ttl)
+    await _advance_cursor(ctx, consumer, source, max_seq, ttl)
 
     return ToolResult.text(output)
 
@@ -224,7 +241,7 @@ async def poll_all_sources_handler(ctx: ToolContext, args: dict) -> ToolResult:
         if messages:
             all_messages.extend(messages)
             max_seq = max(m["rowid"] for m in messages)
-            await ctx.db.set_consumer_cursor(consumer, source_name, max_seq, ttl_days=ttl)
+            await _advance_cursor(ctx, consumer, source_name, max_seq, ttl)
             source_stats.append(f"{source_name}: {len(messages)} new")
         else:
             source_stats.append(f"{source_name}: 0 new")

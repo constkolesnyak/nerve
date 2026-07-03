@@ -387,6 +387,13 @@ class AgentEngine:
         # Read by session-scoped tools (send_file) to avoid dispatching via
         # stale router context from a prior inbound channel.
         self._active_channel: dict[str, str] = {}
+        # Deferred consumer-cursor commits for cron sessions. Cron poll
+        # handlers buffer their cursor advances here instead of writing them
+        # immediately; the buffer is committed only when the run finishes
+        # without error and discarded otherwise, so a mid-run auth failure
+        # (503) can never mark source messages "read" without the agent
+        # having acted on them. See buffer_cursor / commit_cursor_buffer.
+        self._cursor_buffers: dict[str, list[dict[str, Any]]] = {}
         # Resolved model bound to each session's live SDK client. Used to
         # detect mid-session model switches (the CLI fixes its model at
         # connect time, so a change requires recreating the client).
@@ -3743,6 +3750,101 @@ class AgentEngine:
         # lock and must not gate the run lifecycle.
         await self._discard_client(session_id, background_memorize=True)
 
+    # ------------------------------------------------------------------ #
+    #  Deferred consumer-cursor commit (cron email-loss safety)           #
+    # ------------------------------------------------------------------ #
+    #
+    # Source ingestion (email → source_messages) is decoupled from LLM
+    # processing and always durable.  The loss risk lives in the *consumer
+    # cursor*: the inbox-processor cron polls sources and advances the
+    # cursor to mark messages "read".  Previously the poll handler advanced
+    # the cursor immediately — so if the run then failed (e.g. the Claude
+    # auth token expired mid-run → 503 auth_unavailable), the messages were
+    # already marked read but never notified → silent loss.
+    #
+    # Fix: cron poll handlers BUFFER their cursor advances here; the cron
+    # run methods below commit the buffer only when the run finished
+    # cleanly, and discard it on any failure.  Discarding leaves the
+    # messages unread so the next scheduled run reprocesses them — which
+    # also means crons "restart" naturally once tokens return.  User
+    # (non-cron) sessions still commit inline: there is no run boundary to
+    # flush them and their polls are interactive, not at-risk.
+
+    @staticmethod
+    def cursor_is_deferred(session_id: str) -> bool:
+        """Cron sessions defer cursor commits; other sessions commit inline."""
+        return session_id.startswith("cron:")
+
+    def buffer_cursor(
+        self, session_id: str, consumer: str, source: str,
+        seq: int, ttl_days: int,
+    ) -> None:
+        """Record a pending cursor advance for a cron run (not yet persisted)."""
+        self._cursor_buffers.setdefault(session_id, []).append({
+            "consumer": consumer, "source": source,
+            "seq": seq, "ttl_days": ttl_days,
+        })
+
+    def discard_cursor_buffer(self, session_id: str) -> int:
+        """Drop buffered cursor advances (run failed) — returns count dropped."""
+        return len(self._cursor_buffers.pop(session_id, []))
+
+    async def commit_cursor_buffer(self, session_id: str) -> int:
+        """Persist buffered cursor advances (highest seq per consumer/source).
+
+        Returns the number of distinct (consumer, source) cursors written.
+        """
+        entries = self._cursor_buffers.pop(session_id, [])
+        if not entries:
+            return 0
+        latest: dict[tuple[str, str], dict[str, Any]] = {}
+        for e in entries:
+            key = (e["consumer"], e["source"])
+            if key not in latest or e["seq"] > latest[key]["seq"]:
+                latest[key] = e
+        for e in latest.values():
+            await self.db.set_consumer_cursor(
+                e["consumer"], e["source"], e["seq"], ttl_days=e["ttl_days"],
+            )
+        return len(latest)
+
+    @staticmethod
+    def _run_failed(response: str) -> bool:
+        """True if a run's returned text signals a failed turn.
+
+        The engine's error path (``_run_inner``) does NOT raise on API
+        errors such as 503 auth_unavailable — it returns a sentinel string.
+        Deferred cursor buffers must be discarded on any such failure.
+        Errs toward "failed" on ambiguity (empty/blank output), since
+        discarding merely reprocesses messages on the next run.
+        """
+        if not response or not response.strip():
+            return True
+        return (
+            response.startswith("Agent error:")
+            or response.startswith(
+                "The conversation contained an unprocessable image"
+            )
+        )
+
+    async def _settle_cursor_buffer(self, session_id: str, response: str) -> None:
+        """Commit or discard a cron session's buffered cursors by outcome."""
+        if self._run_failed(response):
+            dropped = self.discard_cursor_buffer(session_id)
+            if dropped:
+                logger.warning(
+                    "Cron session %s failed — discarded %d buffered cursor "
+                    "advance(s); source messages will be reprocessed next run",
+                    session_id, dropped,
+                )
+        else:
+            committed = await self.commit_cursor_buffer(session_id)
+            if committed:
+                logger.info(
+                    "Cron session %s committed %d consumer cursor(s)",
+                    session_id, committed,
+                )
+
     async def run_cron(
         self,
         job_id: str,
@@ -3763,12 +3865,19 @@ class AgentEngine:
         session = await self.sessions.create_cron_session(job_id, run_id=run_id)
         session_id = session["id"]
         try:
-            return await self.run(
+            response = await self.run(
                 session_id=session_id,
                 user_message=prompt,
                 source="cron",
                 model=model or self.config.agent.cron_model,
             )
+            await self._settle_cursor_buffer(session_id, response)
+            return response
+        except BaseException:
+            # run() re-raises only on hard failures (cancellation, crashes
+            # that survive the retry). Never commit half-done work.
+            self.discard_cursor_buffer(session_id)
+            raise
         finally:
             await self._teardown_oneshot_client(session_id)
 
@@ -3794,12 +3903,17 @@ class AgentEngine:
             session_id, title=f"Cron: {job_id}", source="cron",
         )
         try:
-            return await self.run(
+            response = await self.run(
                 session_id=session_id,
                 user_message=prompt,
                 source="cron",
                 model=model or self.config.agent.cron_model,
             )
+            await self._settle_cursor_buffer(session_id, response)
+            return response
+        except BaseException:
+            self.discard_cursor_buffer(session_id)
+            raise
         finally:
             # Stable session_id is reused by the next run, which would collide
             # with a parked background task — so persistent crons always discard
