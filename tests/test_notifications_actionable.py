@@ -574,3 +574,55 @@ class TestHandlerRegistry:
         )
         assert result.ok is False
         assert "unsupported decision" in result.audit_event.get("error", "")
+
+
+# ----------------------------------------------------------------------
+#  Error marker (💀) rendering — central rule, not a per-call hack
+# ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_telegram_error_marker_overrides_priority_prefix(
+    fake_engine: MagicMock, tmp_path: Path,
+):
+    """is_error=True renders the error marker (💀) instead of the priority
+    prefix, so a skull always means "failure" regardless of importance.
+    Non-error notifications still use the per-priority prefix.
+    """
+    cfg = NerveConfig()
+    cfg.workspace = tmp_path
+    cfg.notifications = NotificationsConfig(
+        channels=["telegram"],
+        telegram_chat_id=123,
+        priority_prefixes={"high": "🐋 ", "urgent": "🚨 "},
+        error_prefix="💀 ",
+    )
+    svc = NotificationService(cfg, MagicMock(), fake_engine)
+
+    captured: dict[str, str] = {}
+
+    async def _fake_html(bot, chat_id, text, *, reply_markup=None, silent=False):
+        captured["text"] = text
+        m = MagicMock()
+        m.message_id = 7
+        return m
+
+    svc._send_telegram_html = _fake_html          # type: ignore[assignment]
+    svc._get_telegram_bot = lambda: MagicMock()   # type: ignore[assignment]
+    svc._resolve_telegram_chat_id = lambda: 123   # type: ignore[assignment]
+
+    # Error notification → skull, never the whale.
+    await svc._deliver_telegram(
+        "n1", "system", "notify",
+        "Крон x упал с ошибкой", "🍁 boom", "high", None,
+        is_error=True,
+    )
+    assert captured["text"].startswith("💀 ")
+    assert "🐋" not in captured["text"]
+
+    # Ordinary high-priority notification → whale, no skull.
+    await svc._deliver_telegram(
+        "n2", "cron:x", "notify",
+        "PR opened", "body", "high", None,
+    )
+    assert captured["text"].startswith("🐋 ")
+    assert "💀" not in captured["text"]

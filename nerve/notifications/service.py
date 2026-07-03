@@ -206,6 +206,7 @@ class NotificationService:
         channels: list[str] | None = None,
         silent: bool = False,
         force: bool = False,
+        is_error: bool = False,
     ) -> str:
         """Fire-and-forget notification. Returns notification_id.
 
@@ -228,6 +229,9 @@ class NotificationService:
             force: If True, bypass silence matching and deliver normally.
                 A forced send that *still* matched a rule is delivered but
                 stamped + counted as an override for audit.
+            is_error: Mark this as an error/failure notification. Renders the
+                error marker (💀) instead of the priority prefix, so a skull
+                always means "something failed" regardless of priority.
         """
         notification_id = f"notif-{uuid.uuid4().hex[:8]}"
         # Render <YYYY-MM-DD[ HH:MM]> placeholders before silence matching
@@ -282,7 +286,7 @@ class NotificationService:
 
         await self._fanout(
             notification_id, session_id, "notify", title, body, priority,
-            channels=channels, silent=silent,
+            channels=channels, silent=silent, is_error=is_error,
         )
 
         return notification_id
@@ -683,6 +687,7 @@ class NotificationService:
         channels: list[str] | None = None,
         silent: bool = False,
         option_labels: dict[str, str] | None = None,
+        is_error: bool = False,
     ) -> None:
         """Deliver notification to all configured channels in parallel.
 
@@ -701,7 +706,7 @@ class NotificationService:
                     await self._deliver_web(
                         notification_id, session_id, notif_type,
                         title, body, priority, options,
-                        option_labels=option_labels,
+                        option_labels=option_labels, is_error=is_error,
                     )
                     return "web"
                 elif channel_name == "telegram":
@@ -709,6 +714,7 @@ class NotificationService:
                         notification_id, session_id, notif_type,
                         title, body, priority, options,
                         silent=silent, option_labels=option_labels,
+                        is_error=is_error,
                     )
                     if msg_id:
                         await self.db.update_notification(
@@ -744,13 +750,15 @@ class NotificationService:
         priority: str,
         options: list[str] | None,
         option_labels: dict[str, str] | None = None,
+        is_error: bool = False,
     ) -> None:
         """Broadcast notification to web UI via the global broadcaster.
 
         For approval-kind rows we also include ``option_labels`` so the
         web NotificationCard can render readable button text while the
         button click still sends the canonical ``value`` back through
-        the answer endpoint.
+        the answer endpoint. ``is_error`` lets the web client render an
+        error style, matching the 💀 marker used on Telegram.
         """
         from nerve.agent.streaming import broadcaster
         message = {
@@ -762,6 +770,7 @@ class NotificationService:
             "body": body,
             "priority": priority,
             "options": options,
+            "is_error": is_error,
         }
         if option_labels:
             message["option_labels"] = option_labels
@@ -844,6 +853,7 @@ class NotificationService:
         options: list[str] | None,
         silent: bool = False,
         option_labels: dict[str, str] | None = None,
+        is_error: bool = False,
     ) -> str | None:
         """Send notification to Telegram, with inline keyboard for questions/approvals."""
         bot = self._get_telegram_bot()
@@ -855,8 +865,16 @@ class NotificationService:
         if not chat_id:
             return None
 
-        # Build message text
-        priority_prefix = self.config.notifications.priority_prefixes.get(priority, "")
+        # Build message text. An error notification always carries the error
+        # marker (💀) instead of the priority prefix, so a skull consistently
+        # means "something failed" — independent of importance. Non-errors use
+        # the per-priority prefix (⚠️/🚨/…).
+        if is_error:
+            priority_prefix = self.config.notifications.error_prefix
+        else:
+            priority_prefix = self.config.notifications.priority_prefixes.get(
+                priority, "",
+            )
         if title:
             text = f"{priority_prefix}{title}"
             if body:

@@ -700,12 +700,16 @@ class CronService:
 
     async def _notify_system(
         self, title: str, body: str, priority: str = "high",
+        is_error: bool = False,
     ) -> None:
         """Push an operational alert to the user's channels (Telegram + web).
 
         Best-effort: a missing/none notification service or a delivery error
         never propagates into the cron run. Uses the ``system`` session so the
         message is not tied to any one cron chat.
+
+        ``is_error`` marks the alert as a failure, so it renders with the
+        error marker (💀) instead of the priority prefix.
         """
         svc = getattr(self.engine, "notification_service", None)
         if svc is None:
@@ -713,6 +717,7 @@ class CronService:
         try:
             await svc.send_notification(
                 session_id="system", title=title, body=body, priority=priority,
+                is_error=is_error,
             )
         except Exception as e:
             logger.warning("Failed to send cron system notification: %s", e)
@@ -757,12 +762,29 @@ class CronService:
             return
 
         snippet = error_text.strip()
+        if not snippet:
+            # An empty/blank completion is not a real crash. The engine returns
+            # an empty string for a no-op turn (the model ended the turn with no
+            # text). We defensively classify that as "failed" so the cursor
+            # buffer is discarded and the messages get reprocessed on the next
+            # run — nothing is lost. There is nothing to show the user, so a
+            # loud "упал с ошибкой" alert with an empty body is pure noise.
+            # Log it and stay silent.
+            logger.info(
+                "Cron job %s returned an empty completion — treated as a "
+                "no-op (cursor buffer discarded, will reprocess next run); "
+                "no alert sent",
+                job.id,
+            )
+            return
         if len(snippet) > 400:
             snippet = snippet[:400] + "…"
+        # is_error=True → renders the 💀 marker centrally. The title stays clean.
         await self._notify_system(
             title=f"Крон {job.id} упал с ошибкой",
             body=f"🍁 {snippet}",
             priority="high",
+            is_error=True,
         )
 
     async def _auth_available(self) -> bool:

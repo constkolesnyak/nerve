@@ -670,6 +670,10 @@ class NotificationsConfig:
         "high": "⚠️ ",
         "urgent": "🚨 ",
     })
+    # Marker for error/failure notifications. Orthogonal to priority: an error
+    # can be any importance, but it always renders with this prefix so 💀
+    # consistently means "something failed" across every channel.
+    error_prefix: str = "💀 "
 
     @classmethod
     def from_dict(cls, d: dict) -> NotificationsConfig:
@@ -681,6 +685,7 @@ class NotificationsConfig:
                 "high": "⚠️ ",
                 "urgent": "🚨 ",
             }),
+            error_prefix=d.get("error_prefix", "💀 "),
         )
 
 

@@ -341,6 +341,29 @@ async def test_non_auth_error_alerts_every_time():
     _, kwargs = send.call_args
     assert kwargs["priority"] == "high"
     assert "упал с ошибкой" in kwargs["title"]
+    # Failures declare themselves as errors so 💀 is rendered centrally —
+    # the marker is not baked into the title.
+    assert kwargs["is_error"] is True
+    assert "💀" not in kwargs["title"]
+
+
+@pytest.mark.asyncio
+async def test_empty_completion_does_not_alert():
+    """An empty/blank completion is a benign no-op — no user-facing alert.
+
+    The engine returns "" when the model ends a turn with no text. We
+    classify that as failed (to discard the cursor buffer) but must not fire
+    a "упал с ошибкой" notification with an empty body.
+    """
+    svc = _make_service()
+    send = _attach_notify_spy(svc)
+    job = _job("weekly")
+
+    with _patch_probe(200):
+        await svc._handle_failed_run(job, 1, "s", "")
+        await svc._handle_failed_run(job, 2, "s", "   \n  ")
+
+    assert send.call_count == 0
 
 
 @pytest.mark.asyncio
