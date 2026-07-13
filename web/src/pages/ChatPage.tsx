@@ -45,27 +45,6 @@ export function ChatPage() {
     sendMessage, stopSession, toggleSidebar, openFilesPanel,
   } = useChatStore();
 
-  // URL → activeSession is handled by the useEffect[sessionId] below.
-  // activeSession → URL is intentionally NOT done as a mirror effect —
-  // that races with `loadSessions()` (which starts with sessions=[], so any
-  // "URL is unknown to us" check is unreliable on a fresh tab) and with the
-  // server's `session_switched` WS message that fires before our store
-  // knows the URL's session exists. Instead we navigate explicitly from
-  // each call-site that changes the active session without a URL change.
-  const handleCreateSession = useCallback(() => {
-    // Single entry point for "new chat": navigate to /chat/new and let
-    // useEffect[sessionId] mint (or reuse) the virtual session. Matches
-    // claude.ai/new — the URL is the source of truth.
-    navigate('/chat/new');
-  }, [navigate]);
-
-  const handleDeleteSession = useCallback(async (id: string) => {
-    await deleteSession(id);
-    const next = useChatStore.getState().activeSession;
-    if (next) navigate(`/chat/${next}`, { replace: true });
-    else navigate('/chat/new', { replace: true });
-  }, [deleteSession, navigate]);
-
   // Chat-scoped keyboard shortcuts. Global ones (new chat, search, modal,
   // Esc cascade) live in <GlobalShortcuts /> in App.tsx.
   const chatShortcuts = useMemo<ShortcutDef[]>(() => [
@@ -113,13 +92,33 @@ export function ChatPage() {
         const id = useChatStore.getState().activeSession;
         if (!id) return;
         if (window.confirm('Delete this conversation?')) {
-          void handleDeleteSession(id);
+          void useChatStore.getState().deleteSession(id);
         }
       },
     },
-  ], [handleDeleteSession]);
+  ], []);
 
   useKeyboardShortcuts(chatShortcuts);
+
+  // URL → activeSession is handled by the useEffect[sessionId] below.
+  // activeSession → URL is intentionally NOT done as a mirror effect —
+  // that races with `loadSessions()` (which starts with sessions=[], so any
+  // "URL is unknown to us" check is unreliable on a fresh tab) and with the
+  // server's `session_switched` WS message that fires before our store
+  // knows the URL's session exists. Instead we navigate explicitly from
+  // each call-site that changes the active session without a URL change.
+  const handleCreateSession = useCallback(async () => {
+    await createSession();
+    const next = useChatStore.getState().activeSession;
+    if (next) navigate(`/chat/${next}`, { replace: true });
+  }, [createSession, navigate]);
+
+  const handleDeleteSession = useCallback(async (id: string) => {
+    await deleteSession(id);
+    const next = useChatStore.getState().activeSession;
+    if (next) navigate(`/chat/${next}`, { replace: true });
+    else navigate('/chat', { replace: true });
+  }, [deleteSession, navigate]);
 
   // Mirror the active session's title into the browser tab. Same cleaning
   // rules as the sidebar (strip leading '#' and 'Implement:' prefix).
@@ -149,38 +148,22 @@ export function ChatPage() {
 
   useEffect(() => {
     loadSessions().then(() => {
-      if (sessionId === 'new') {
-        // /chat/new — always land on a fresh virtual chat (claude.ai/new).
-        // createSession() mints a new virtual session or reuses an existing
-        // unsent one, then makes it active.
-        void createSession();
-        return;
-      }
       if (sessionId) {
-        // URL has explicit session id — switch to it.
+        // URL has explicit session — switch to it
         if (sessionId !== activeSession || messages.length === 0) {
           switchSession(sessionId);
         }
-        return;
+      } else if (!activeSession) {
+        // No URL param and no active session yet — pick the most recent
+        const { sessions: loaded } = useChatStore.getState();
+        if (loaded.length > 0) {
+          switchSession(loaded[0].id);
+        }
+        // Otherwise, the server's session_switched WS message will set it
       }
-      // No sessionId in the URL should not happen anymore — App.tsx redirects
-      // both / and /chat to /chat/new. Left as a defensive fallback in case a
-      // stray Link renders without an id: behave like /chat/new.
-      void createSession();
     });
   }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Adopt real id into the URL as soon as the virtual "new chat" is
-  // materialized server-side (on first message, first file upload, etc.).
-  // Keeps reload behavior tight: /chat/new = always empty, /chat/<uuid> =
-  // preserves the conversation. Replace-navigation so there's no /chat/new
-  // ghost in browser history.
-  useEffect(() => {
-    if (sessionId !== 'new') return;
-    if (!activeSession) return;
-    if (virtualSession && virtualSession.id === activeSession) return;
-    navigate(`/chat/${activeSession}`, { replace: true });
-  }, [sessionId, activeSession, virtualSession, navigate]);
 
   const statusLabel = agentStatus.state === 'tool'
     ? `Using ${agentStatus.toolName}...`

@@ -138,6 +138,12 @@ class AgentConfig:
     max_concurrent: int = 4
     thinking: str = "max"       # max, high, medium, low, disabled, adaptive, or number (budget_tokens)
     effort: str = "max"         # max, xhigh, high, medium, low
+    # Effort for cron- and hook-sourced turns (sensing / triage work). These
+    # fire far more often than interactive sessions and rarely need Opus-tier
+    # deliberation, so they default lower than `effort` above to cut token
+    # spend. Applied in engine._build_options when source is "cron" or "hook";
+    # interactive sources (web, telegram, wakeup) keep the full `effort`.
+    cron_effort: str = "medium"  # max, xhigh, high, medium, low
     context_1m: bool = True     # Enable 1M context window beta
     # Substrings of model names for which the context-1m beta header must NOT
     # be sent (some subscriptions reject the beta for specific models — e.g.
@@ -145,6 +151,16 @@ class AgentConfig:
     # this subscription"). Match is case-insensitive substring on the resolved
     # model name. Empty list = send beta for all models when context_1m=True.
     context_1m_excluded_models: list[str] = field(default_factory=list)
+    # Prompt-cache write TTL policy: "5m" (status quo — every write uses the
+    # default 5-minute TTL), "1h" (always request the 1-hour TTL: writes cost
+    # 2x base input instead of 1.25x but survive sparse turn cadences), or
+    # "auto" (per session at client-build time — sparse-cadence sessions such
+    # as persistent crons, wakeup loops and spaced conversations get 1h;
+    # dense sessions stay on 5m). See nerve/agent/cache_policy.py.
+    cache_ttl: str = "5m"
+    # Substrings of model names that must never request the 1h cache TTL
+    # (same matching semantics as context_1m_excluded_models).
+    cache_ttl_excluded_models: list[str] = field(default_factory=list)
     # Hung-CLI detection: max idle time between SDK messages on a single
     # turn before the engine treats the subprocess as dead and falls into
     # the existing CLI-crash retry path.  Set to 0 to disable (legacy
@@ -174,9 +190,14 @@ class AgentConfig:
             max_concurrent=d.get("max_concurrent", 4),
             thinking=str(d.get("thinking", "max")),
             effort=str(d.get("effort", "max")),
+            cron_effort=str(d.get("cron_effort", "medium")),
             context_1m=d.get("context_1m", True),
             context_1m_excluded_models=list(
                 d.get("context_1m_excluded_models", []) or []
+            ),
+            cache_ttl=str(d.get("cache_ttl", "5m")),
+            cache_ttl_excluded_models=list(
+                d.get("cache_ttl_excluded_models", []) or []
             ),
             cli_idle_timeout_seconds=int(d.get("cli_idle_timeout_seconds", 900)),
             background_agent_permissions=bool(
@@ -666,6 +687,7 @@ class NotificationsConfig:
     channels: list[str] = field(default_factory=lambda: ["web", "telegram"])
     telegram_chat_id: int | None = None       # Target chat; falls back to first allowed_user
     default_expiry_hours: int = 48            # Auto-expire unanswered questions
+    max_redeliveries: int = 3                 # Per-row cap on snooze/re-delivery cycles
     priority_prefixes: dict[str, str] = field(default_factory=lambda: {
         "high": "⚠️ ",
         "urgent": "🚨 ",
@@ -681,6 +703,7 @@ class NotificationsConfig:
             channels=d.get("channels", ["web", "telegram"]),
             telegram_chat_id=d.get("telegram_chat_id"),
             default_expiry_hours=d.get("default_expiry_hours", 48),
+            max_redeliveries=d.get("max_redeliveries", 3),
             priority_prefixes=d.get("priority_prefixes", {
                 "high": "⚠️ ",
                 "urgent": "🚨 ",
