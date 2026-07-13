@@ -243,7 +243,6 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
             <span>Search sessions</span>
           </button>
 
-
           {/* New chat pill (hidden under input when open) */}
           <button
             onClick={onCreate}

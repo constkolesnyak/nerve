@@ -332,7 +332,15 @@ class TelegramChannel(BaseChannel):
         await self._app.initialize()
         await self._app.start()
         await self._app.updater.start_polling(
-            drop_pending_updates=True,
+            # Do NOT drop updates that queued while we were offline.
+            # `nerve restart` (and any daemon respawn) goes through this
+            # startup path; with drop_pending_updates=True, every message
+            # the user sent during the restart window was silently discarded
+            # by Telegram and never redelivered — a real "lost message" bug.
+            # Telegram retains updates ~24h and only advances the offset once
+            # we fetch them, so False makes a restart pick up the backlog.
+            # The watchdog _rebuild() path already uses False; keep parity.
+            drop_pending_updates=False,
             # Retry initial connection indefinitely — don't give up on
             # transient network errors during startup
             bootstrap_retries=-1,
@@ -563,9 +571,13 @@ class TelegramChannel(BaseChannel):
             self._cache_message(sent.message_id, chat_id, chunk)
 
     def format_response(self, text: str) -> str:
-        """Truncate for Telegram if needed."""
-        if len(text) > MAX_MSG_LEN:
-            return text[:MAX_MSG_LEN - 20] + "\n\n... (truncated)"
+        """Return text unchanged.
+
+        Long messages must NOT be truncated here: send() already splits text into
+        MAX_MSG_LEN-sized chunks and delivers them as sequential messages. Truncating
+        first (the old behaviour) defeated that chunking and dropped the tail of long
+        replies with a "... (truncated)" marker.
+        """
         return text
 
     # ------------------------------------------------------------------ #
@@ -1519,17 +1531,52 @@ class TelegramChannel(BaseChannel):
         )
 
         if success:
-            await query.answer(f"Answered: {answer}")
+            status_line = f"\u2705 Answered: {answer}"
+            toast = f"Answered: {answer}"
+            # A snooze keeps the row pending with redeliver_at stamped \u2014
+            # confirm on the card that it will come back, instead of the
+            # generic answered state (which read as "handled, gone").
+            snoozed_until = await self._get_snoozed_until(notification_id)
+            if snoozed_until:
+                status_line = (
+                    f"\U0001F4A4 Snoozed until {snoozed_until} \u2014 will resurface"
+                )
+                toast = f"Snoozed until {snoozed_until}"
+            await query.answer(toast)
             try:
                 original = query.message.text or ""
                 await query.edit_message_text(
-                    text=f"{original}\n\n\u2705 Answered: {answer}",
+                    text=f"{original}\n\n{status_line}",
                     reply_markup=None,
                 )
             except Exception:
                 pass
         else:
             await query.answer("Already answered or expired", show_alert=True)
+
+    async def _get_snoozed_until(self, notification_id: str) -> str | None:
+        """Return a human-readable re-delivery time if the row was snoozed.
+
+        After ``handle_answer`` succeeds, a snoozed approval is the only
+        outcome that leaves the row ``pending`` with ``redeliver_at``
+        set. Rendered in the host's local timezone. None when the answer
+        was a final decision (or anything fails \u2014 this is cosmetic).
+        """
+        try:
+            notif = await self._notification_service.db.get_notification(
+                notification_id,
+            )
+            if (
+                not notif
+                or notif.get("status") != "pending"
+                or not notif.get("redeliver_at")
+            ):
+                return None
+            from datetime import datetime
+            dt = datetime.fromisoformat(notif["redeliver_at"])
+            return dt.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+        except Exception:
+            return None
 
     async def _handle_reply(self, update: Update, context: Any) -> None:
         """Handle /reply <text> — answer the most recent pending question."""

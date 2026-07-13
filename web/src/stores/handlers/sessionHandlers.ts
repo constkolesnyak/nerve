@@ -1,6 +1,7 @@
 import type { WSMessage } from '../../api/websocket';
 import type { PanelTab } from '../../types/chat';
 import { applyStreamEvent, rebuildPanelTabsFromBuffer, deriveStatus, extractTodosFromBuffer, extractCCTasksFromBuffer } from '../helpers/bufferReplay';
+import { hydrateMessage } from '../../utils/hydrateMessage';
 import type { Get, Set } from './types';
 
 // ------------------------------------------------------------------ //
@@ -42,12 +43,20 @@ export function handleSessionStatus(
     // Rebuild panel tabs from buffered events
     const restored = rebuildPanelTabsFromBuffer(bufferedEvents, blocks);
 
-    // Restore pending interaction from buffer (last interaction event wins)
+    // Restore pending interaction from buffer (last interaction event wins),
+    // but treat any interaction the buffer later marks resolved as settled so a
+    // mid-turn reconnect doesn't re-prompt for an already-answered poll/plan.
+    const resolvedInteractionIds = new Set<string>();
+    for (const event of bufferedEvents) {
+      if (event.type === 'interaction_resolved') {
+        resolvedInteractionIds.add((event as Extract<WSMessage, { type: 'interaction_resolved' }>).interaction_id);
+      }
+    }
     let restoredInteraction: ReturnType<Get>['pendingInteraction'] = null;
     for (const event of bufferedEvents) {
       if (event.type === 'interaction') {
         const ie = event as Extract<WSMessage, { type: 'interaction' }>;
-        restoredInteraction = {
+        restoredInteraction = resolvedInteractionIds.has(ie.interaction_id) ? null : {
           interactionId: ie.interaction_id,
           interactionType: ie.interaction_type,
           toolName: ie.tool_name,
@@ -261,4 +270,17 @@ export function handleAnswerInjected(
       }],
     }));
   }
+}
+
+export function handleUserMessage(
+  msg: Extract<WSMessage, { type: 'user_message' }>,
+  get: Get,
+  set: Set,
+): void {
+  // A message sent from another client of this session — render the user
+  // bubble live. The sender is excluded server-side, so this never duplicates
+  // its own optimistic message. hydrateMessage rebuilds any image/file blocks.
+  if (msg.session_id !== get().activeSession) return;
+  const hydrated = hydrateMessage({ role: 'user', content: msg.content, blocks: msg.blocks ?? undefined });
+  set(s => ({ messages: [...s.messages, hydrated] }));
 }

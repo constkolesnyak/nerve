@@ -49,8 +49,7 @@ function App() {
       <GlobalShortcuts />
       <Routes>
         <Route element={<AppShell />}>
-          <Route path="/" element={<Navigate to="/chat/new" replace />} />
-          <Route path="/chat" element={<Navigate to="/chat/new" replace />} />
+          <Route path="/" element={<Navigate to="/chat" replace />} />
           <Route path="/chat/:sessionId?" element={<ChatPage />} />
           <Route path="/files/*" element={<FilesPage />} />
           <Route path="/tasks" element={<TasksPage />} />
@@ -95,9 +94,8 @@ function GlobalShortcuts() {
       description: 'New chat',
       section: 'global',
       action: () => {
-        // Single entry point — ChatPage's useEffect[sessionId] mints/reuses
-        // the virtual session when it sees sessionId === 'new'.
-        navigate('/chat/new');
+        navigate('/chat');
+        void useChatStore.getState().createSession();
       },
     },
     {
@@ -114,10 +112,7 @@ function GlobalShortcuts() {
           store.requestSearchFocus();
         };
         if (!window.location.pathname.startsWith('/chat')) {
-          // Preserve the user's current chat context if there is one, so
-          // focus-from-elsewhere doesn't yank them into an empty new chat.
-          const active = useChatStore.getState().activeSession;
-          navigate(active ? `/chat/${active}` : '/chat/new');
+          navigate('/chat');
           // Wait one tick for ChatPage + SessionSidebar to mount.
           setTimeout(focusNow, 0);
         } else {
