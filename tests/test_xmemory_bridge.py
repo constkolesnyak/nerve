@@ -2,7 +2,7 @@
 
 xmemory runs *alongside* memU, never replacing it:
 * ``memorize`` dual-writes (memU + xmemory async), and
-* ``memory_recall`` appends xmemory's synthesized answer to memU's hits.
+* ``memory_recall`` appends xmemory's read output to memU's hits.
 
 These tests lock in three contracts: (1) the bridge is inert unless both a
 token and an instance_id are configured, (2) every xmemory failure is
@@ -12,6 +12,7 @@ both sources without regressing the memU-only output shape.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,7 +26,7 @@ from nerve.agent.tools.handlers.memory import (
 )
 from nerve.agent.tools.registry import ToolContext
 from nerve.config import NerveConfig, XmemoryConfig
-from nerve.memory.xmemory_bridge import XmemoryBridge, _extract_answer
+from nerve.memory.xmemory_bridge import XmemoryBridge, _serialize_read_payload
 
 
 # --------------------------------------------------------------------------- #
@@ -67,6 +68,7 @@ def test_config_from_dict_defaults_and_overrides() -> None:
     assert c.api_key == "" and c.instance_id == ""
     assert c.api_url == "https://api.xmemory.ai"
     assert c.extraction_logic == "deep"
+    assert c.read_mode == "single-answer"
     assert c.timeout == 60.0
 
     c2 = XmemoryConfig.from_dict({
@@ -74,10 +76,12 @@ def test_config_from_dict_defaults_and_overrides() -> None:
         "instance_id": "inst_1",
         "api_url": "https://example.test",
         "extraction_logic": "fast",
+        "read_mode": "raw-tables",
         "timeout": 30,
     })
     assert c2.enabled and c2.api_url == "https://example.test"
-    assert c2.extraction_logic == "fast" and c2.timeout == 30.0
+    assert c2.extraction_logic == "fast" and c2.read_mode == "raw-tables"
+    assert c2.timeout == 30.0
 
 
 def test_nerveconfig_wires_xmemory_block() -> None:
@@ -88,16 +92,69 @@ def test_nerveconfig_wires_xmemory_block() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Pure helper: answer extraction
+# Pure helper: read-payload serialization
 # --------------------------------------------------------------------------- #
 
 
-def test_extract_answer_shapes() -> None:
-    assert _extract_answer(SimpleNamespace(reader_result={"answer": "  hi "})) == "hi"
-    assert _extract_answer(SimpleNamespace(reader_result={"answer": ""})) is None
-    assert _extract_answer(SimpleNamespace(reader_result={})) is None
-    assert _extract_answer(SimpleNamespace(reader_result="plain")) == "plain"
-    assert _extract_answer(SimpleNamespace(reader_result=SimpleNamespace(answer="x"))) == "x"
+def test_serialize_prefers_reader_results() -> None:
+    """When the server decomposes the query, the per-sub-query results win, and
+    the SDK's Pydantic models are unwrapped to plain dicts for JSON."""
+    from xmemory import ReadResult, TaggedReaderResult
+
+    result = ReadResult(
+        trace_id="t",
+        reader_result="combined back-compat answer",
+        reader_results=[
+            TaggedReaderResult(sub_query="Who leads sales?", reader_result={"answer": "Ann"}),
+            TaggedReaderResult(sub_query="What is churn?", reader_result="", error="no data"),
+        ],
+    )
+    parsed = json.loads(_serialize_read_payload(result))
+    assert [p["sub_query"] for p in parsed] == ["Who leads sales?", "What is churn?"]
+    assert parsed[0]["reader_result"] == {"answer": "Ann"}
+    assert parsed[1]["error"] == "no data"
+
+
+def test_serialize_falls_back_to_reader_result() -> None:
+    """No decomposition (empty ``reader_results``) → serialize the combined
+    ``reader_result``, intact. The bridge never reaches for an ``answer`` key:
+    raw-tables is columns+rows, xresponse is objects+relations, and both are
+    passed through whole."""
+    raw_tables = {
+        "columns": ["question", "answer"],
+        "rows": [["refund window?", "30 days"], ["SLA?", "99.9%"]],
+    }
+    assert json.loads(
+        _serialize_read_payload(SimpleNamespace(reader_result=raw_tables, reader_results=[]))
+    ) == raw_tables
+
+    xresponse = {"objects": [{"type": "Person", "name": "Ann"}], "relations": []}
+    assert json.loads(
+        _serialize_read_payload(SimpleNamespace(reader_result=xresponse, reader_results=[]))
+    ) == xresponse
+
+
+def test_serialize_string_payload_passes_through_unquoted() -> None:
+    assert _serialize_read_payload(
+        SimpleNamespace(reader_result="  a plain answer  ", reader_results=[])
+    ) == "a plain answer"
+
+
+def test_serialize_empty_payload_is_none() -> None:
+    assert _serialize_read_payload(
+        SimpleNamespace(reader_result=None, reader_results=[])
+    ) is None
+    assert _serialize_read_payload(
+        SimpleNamespace(reader_result="", reader_results=[])
+    ) is None
+
+
+def test_serialize_preserves_non_ascii() -> None:
+    """JSON rendering must not escape non-ASCII into \\uXXXX noise."""
+    out = _serialize_read_payload(
+        SimpleNamespace(reader_result={"city": "Zürich"}, reader_results=[])
+    )
+    assert "Zürich" in out
 
 
 # --------------------------------------------------------------------------- #
@@ -129,10 +186,18 @@ async def test_bridge_disabled_when_package_missing(monkeypatch) -> None:
 # --------------------------------------------------------------------------- #
 
 
-async def _enabled_bridge(extraction_logic: str = "deep") -> XmemoryBridge:
+async def _enabled_bridge(
+    extraction_logic: str = "deep",
+    read_mode: str = "single-answer",  # mirrors the production default
+) -> XmemoryBridge:
     """Build a bridge bound to a (fake-token) real client, then mock the
     instance handle so reads/writes never hit the network."""
-    cfg = XmemoryConfig(api_key="tok", instance_id="inst_1", extraction_logic=extraction_logic)
+    cfg = XmemoryConfig(
+        api_key="tok",
+        instance_id="inst_1",
+        extraction_logic=extraction_logic,
+        read_mode=read_mode,
+    )
     bridge = XmemoryBridge(cfg)
     await bridge.initialize()  # client + .instance() are network-free
     assert bridge.available
@@ -141,16 +206,64 @@ async def _enabled_bridge(extraction_logic: str = "deep") -> XmemoryBridge:
 
 
 @pytest.mark.asyncio
-async def test_recall_answer_returns_single_answer() -> None:
-    bridge = await _enabled_bridge()
+async def test_recall_answer_serializes_single_answer() -> None:
+    bridge = await _enabled_bridge(read_mode="single-answer")
     bridge._instance.read = AsyncMock(
         return_value=SimpleNamespace(reader_result={"answer": "alice@acme.com"})
     )
     ans = await bridge.recall_answer("What is Alice's email?")
-    assert ans == "alice@acme.com"
+    assert json.loads(ans) == {"answer": "alice@acme.com"}
     # Uses SINGLE_ANSWER read mode.
     _, kwargs = bridge._instance.read.call_args
     assert kwargs["read_mode"] == bridge._ReadMode.SINGLE_ANSWER
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
+async def test_recall_defaults_to_single_answer_read_mode() -> None:
+    """An unconfigured ``read_mode`` reads in single-answer mode."""
+    bridge = XmemoryBridge(XmemoryConfig(api_key="tok", instance_id="inst_1"))
+    await bridge.initialize()
+    bridge._instance = AsyncMock()
+    bridge._instance.read = AsyncMock(
+        return_value=SimpleNamespace(reader_result={"answer": "HQ is in Berlin."})
+    )
+    assert json.loads(await bridge.recall_answer("Where is HQ?")) == {
+        "answer": "HQ is in Berlin.",
+    }
+    _, kwargs = bridge._instance.read.call_args
+    assert kwargs["read_mode"] == bridge._ReadMode.SINGLE_ANSWER
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
+async def test_recall_answer_honors_raw_tables_read_mode() -> None:
+    bridge = await _enabled_bridge(read_mode="raw-tables")
+    table = {"columns": ["k"], "rows": [["v"]]}
+    bridge._instance.read = AsyncMock(
+        return_value=SimpleNamespace(reader_result=table)
+    )
+    ans = await bridge.recall_answer("Show rows")
+    assert json.loads(ans) == table  # columns and rows both survive
+    _, kwargs = bridge._instance.read.call_args
+    assert kwargs["read_mode"] == bridge._ReadMode.RAW_TABLES
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("configured", "expected_attr"),
+    [
+        ("raw_tables", "RAW_TABLES"),   # underscore alias still accepted
+        ("RAW-TABLES", "RAW_TABLES"),   # case-insensitive
+        ("  xresponse ", "XRESPONSE"),  # surrounding whitespace tolerated
+        ("nonsense", "SINGLE_ANSWER"),  # unknown → default
+        ("", "SINGLE_ANSWER"),          # empty → default
+    ],
+)
+async def test_read_mode_resolution(configured: str, expected_attr: str) -> None:
+    bridge = await _enabled_bridge(read_mode=configured)
+    assert bridge._read_mode() == getattr(bridge._ReadMode, expected_attr)
     await bridge.aclose()
 
 
@@ -228,7 +341,7 @@ async def test_recall_handler_combines_memu_and_xmemory() -> None:
 
     assert "[memU]" in text
     assert "Alice lives in Metropolis" in text
-    assert "[xmemory] synthesized answer" in text
+    assert "[xmemory]" in text
     assert "alice@acme.com" in text
     xmem.recall_answer.assert_awaited_once_with("alice")
 

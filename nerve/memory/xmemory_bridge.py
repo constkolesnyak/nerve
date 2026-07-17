@@ -11,7 +11,10 @@ In Nerve, xmemory runs *next to* memU, never replacing it:
 * ``memorize`` tool  → dual-writes: memU (as today) **and** xmemory
   (async ``write_async``, fire-and-forget).
 * ``memory_recall`` tool → memU returns its N items/breadcrumbs **and**
-  this bridge appends xmemory's single synthesized answer to the query.
+  this bridge appends xmemory's read result (serialized as JSON) for the
+  query. The read mode is configurable (``xmemory.read_mode``): a synthesized
+  natural-language answer by default (``single-answer``), or the structured
+  ``raw-tables`` / ``xresponse`` payloads.
 * The memorization *sweep* (session-close, cron) stays memU-only — it
   never goes through the ``memorize`` tool handler, so it's untouched.
 
@@ -22,6 +25,7 @@ or failing xmemory can never break memU recall or the memorize tool.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -131,6 +135,25 @@ class XmemoryBridge:
         fast = (self._config.extraction_logic or "deep").strip().lower() == "fast"
         return self._ExtractionLogic.FAST if fast else self._ExtractionLogic.DEEP
 
+    def _read_mode(self) -> Any:
+        """Map the configured ``read_mode`` to the SDK enum.
+
+        Config values mirror the SDK's own wire values (``single-answer``,
+        ``raw-tables``, ``xresponse``), so the enum resolves them directly and
+        any mode the SDK adds later needs no change here. Underscores are
+        accepted as an alias; unknown values fall back to ``single-answer``,
+        the configured default.
+        """
+        mode = (self._config.read_mode or "").strip().lower().replace("_", "-")
+        try:
+            return self._ReadMode(mode)
+        except ValueError:
+            logger.warning(
+                "xmemory: unknown read_mode=%r, falling back to single-answer",
+                self._config.read_mode,
+            )
+            return self._ReadMode.SINGLE_ANSWER
+
     async def memorize(self, text: str) -> bool:
         """Async-write ``text`` to xmemory (fire-and-forget).
 
@@ -149,40 +172,64 @@ class XmemoryBridge:
             return False
 
     async def recall_answer(self, query: str) -> str | None:
-        """Query xmemory and return its single synthesized answer.
+        """Query xmemory and return its read result serialized as JSON.
 
-        Uses ``SINGLE_ANSWER`` read mode — xmemory translates the question
-        to SQL over its knowledge graph and returns a natural-language
-        answer. Returns the answer string, or ``None`` when unavailable,
-        empty, or on any error (so recall always falls back to memU alone).
+        The read mode comes from ``xmemory.read_mode``. The result shape is
+        mode-dependent — an answer envelope (``single-answer``), table
+        ``columns``/``rows`` (``raw-tables``), or ``objects``/``relations``
+        (``xresponse``) — with no field common to all three. So the bridge does
+        not parse it: it serializes the whole read payload as JSON and hands
+        that to recall, letting the model read the structure. The payload is the
+        per-sub-query ``reader_results`` when the server decomposed the query
+        (xmemory-ai 0.10.0+), else the combined ``reader_result``.
+
+        Returns ``None`` when unavailable, empty, or on any error (so recall
+        always falls back to memU alone).
         """
         if not self.available or not query:
             return None
         try:
-            result = await self._instance.read(
-                query, read_mode=self._ReadMode.SINGLE_ANSWER,
-            )
-            return _extract_answer(result)
+            result = await self._instance.read(query, read_mode=self._read_mode())
         except Exception as e:
             logger.warning("xmemory read failed: %s", e)
             return None
+        return _serialize_read_payload(result)
 
 
-def _extract_answer(result: Any) -> str | None:
-    """Pull the natural-language answer out of an SDK ReadResult.
+def _serialize_read_payload(result: Any) -> str | None:
+    """Serialize an SDK ReadResult's payload as JSON.
 
-    SINGLE_ANSWER mode yields ``reader_result == {"answer": "..."}``; we
-    stay defensive about shape (dict, object, or bare string).
+    Prefers ``reader_results`` (one entry per sub-query when the server
+    decomposed a composite query) and falls back to the combined
+    ``reader_result`` when it is absent or empty — a query the server did not
+    decompose, or a server predating decomposition. The payload shape is
+    mode-dependent and left intact; only Pydantic models are unwrapped to plain
+    dicts (via :func:`_json_default`) so ``json`` can render them. A bare-string
+    payload passes through unquoted. Returns ``None`` for an empty payload.
     """
-    reader = getattr(result, "reader_result", result)
-    answer: Any = None
-    if isinstance(reader, dict):
-        answer = reader.get("answer")
-    elif hasattr(reader, "answer"):
-        answer = reader.answer
-    elif isinstance(reader, str):
-        answer = reader
-    if answer is None:
+    payload = getattr(result, "reader_results", None)
+    if not payload:  # None or empty list → fall back to the combined result
+        payload = getattr(result, "reader_result", result)
+    if payload is None:
         return None
-    text = str(answer).strip()
-    return text or None
+    if isinstance(payload, str):
+        return payload.strip() or None
+    try:
+        text = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, default=_json_default,
+        )
+    except Exception:
+        text = str(payload)
+    return text.strip() or None
+
+
+def _json_default(value: Any) -> Any:
+    """``json.dumps`` hook for values it cannot render natively — chiefly the
+    SDK's Pydantic models (e.g. ``TaggedReaderResult``), unwrapped to dicts."""
+    for attr in ("model_dump", "dict"):
+        method = getattr(value, attr, None)
+        if callable(method):
+            return method()
+    if hasattr(value, "__dict__"):
+        return value.__dict__
+    return str(value)
