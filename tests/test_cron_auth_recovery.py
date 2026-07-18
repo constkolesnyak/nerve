@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nerve.config import CronMessagesConfig
 from nerve.cron.jobs import CronJob
 from nerve.cron.service import (
     _AUTH_FAILURE_MARKER,
@@ -27,6 +28,11 @@ from nerve.cron.service import (
 
 def _make_service(proxy_enabled: bool = True) -> CronService:
     config = MagicMock()
+    # Real catalog, not a MagicMock: alert text is str.format()-ed, and a
+    # MagicMock would silently format into another MagicMock instead of a
+    # string. Defaults are the shipped English ones, so these assertions stay
+    # independent of whatever language an operator configures.
+    config.cron.messages = CronMessagesConfig()
     config.timezone = "UTC"
     config.agent.cron_model = "test-model"
     config.proxy.enabled = proxy_enabled
@@ -323,7 +329,7 @@ async def test_auth_down_alert_fires_once_per_outage():
     assert send.call_count == 1
     _, kwargs = send.call_args
     assert kwargs["priority"] == "urgent"
-    assert "кроны на паузе" in kwargs["title"]
+    assert "cron paused" in kwargs["title"]
 
 
 @pytest.mark.asyncio
@@ -340,7 +346,7 @@ async def test_non_auth_error_alerts_every_time():
     assert send.call_count == 2
     _, kwargs = send.call_args
     assert kwargs["priority"] == "high"
-    assert "упал с ошибкой" in kwargs["title"]
+    assert "failed" in kwargs["title"]
     # Failures declare themselves as errors so 💀 is rendered centrally —
     # the marker is not baked into the title.
     assert kwargs["is_error"] is True
@@ -353,7 +359,7 @@ async def test_empty_completion_does_not_alert():
 
     The engine returns "" when the model ends a turn with no text. We
     classify that as failed (to discard the cursor buffer) but must not fire
-    a "упал с ошибкой" notification with an empty body.
+    a run_failed notification with an empty body.
     """
     svc = _make_service()
     send = _attach_notify_spy(svc)
@@ -382,7 +388,7 @@ async def test_recovery_alert_lists_jobs_and_resets_flag():
     # One "tokens back" alert naming the re-fired jobs.
     recovery_calls = [
         c for c in send.call_args_list
-        if "вернулись" in c.kwargs.get("title", "")
+        if "Tokens are back" in c.kwargs.get("title", "")
     ]
     assert len(recovery_calls) == 1
     body = recovery_calls[0].kwargs["body"]
@@ -406,15 +412,27 @@ async def test_recovery_no_alert_when_nothing_fired():
     assert svc._auth_down_notified is False
     recovery_calls = [
         c for c in send.call_args_list
-        if "вернулись" in c.kwargs.get("title", "")
+        if "Tokens are back" in c.kwargs.get("title", "")
     ]
     assert recovery_calls == []
 
 
-def test_plural_cron():
-    assert CronService._plural_cron(1) == "крон"
-    assert CronService._plural_cron(2) == "крона"
-    assert CronService._plural_cron(5) == "кронов"
-    assert CronService._plural_cron(11) == "кронов"
-    assert CronService._plural_cron(21) == "крон"
-    assert CronService._plural_cron(22) == "крона"
+def test_plural_cron_simple_rule():
+    """Default rule: singular only at exactly 1 — including 21, where the
+    Slavic rule would wrongly pick the singular stem."""
+    svc = _make_service()
+    got = {n: svc._plural_cron(n) for n in (1, 2, 5, 11, 21, 22)}
+    assert got == {1: "job", 2: "jobs", 5: "jobs",
+                   11: "jobs", 21: "jobs", 22: "jobs"}
+
+
+def test_plural_cron_slavic_rule():
+    """Opt-in rule for languages with a 1 / 2-4 / 5+ split."""
+    svc = _make_service()
+    svc.config.cron.messages = CronMessagesConfig.from_dict({
+        "plural_rule": "slavic",
+        "plural_forms": ["one", "few", "many"],
+    })
+    got = {n: svc._plural_cron(n) for n in (1, 2, 5, 11, 21, 22)}
+    assert got == {1: "one", 2: "few", 5: "many",
+                   11: "many", 21: "one", 22: "few"}

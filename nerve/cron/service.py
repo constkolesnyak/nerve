@@ -178,7 +178,7 @@ class CronService:
         # True when the auth-retry queue was rebuilt from logs after a restart
         # (see _reconstruct_auth_retry_jobs) rather than filled by a live outage
         # this process witnessed. In that case the user never saw a "tokens
-        # gone" alert, so the recovery sweep must NOT claim "токены вернулись"
+        # gone" alert, so the recovery sweep must NOT use auth_restored_*
         # (nothing visibly disappeared) — it phrases the message as catching up
         # deferred crons instead. Cleared once the recovery message is sent.
         self._auth_outage_reconstructed: bool = False
@@ -823,17 +823,28 @@ class CronService:
         except Exception as e:
             logger.warning("Failed to send cron system notification: %s", e)
 
-    @staticmethod
-    def _plural_cron(n: int) -> str:
-        """Russian plural for 'крон' (1 крон / 2 крона / 5 кронов)."""
-        if 11 <= n % 100 <= 14:
-            return "кронов"
-        last = n % 10
-        if last == 1:
-            return "крон"
-        if 2 <= last <= 4:
-            return "крона"
-        return "кронов"
+    def _plural_cron(self, n: int) -> str:
+        """Plural noun for ``n`` jobs, per the configured forms and rule.
+
+        The Slavic rule is not a superset of the English one — English wants
+        "21 jobs" where Slavic picks the singular stem for any n ending in 1 —
+        so the rule is selected explicitly rather than inferred.
+        """
+        msgs = self.config.cron.messages
+        forms = list(msgs.plural_forms) or ["job", "jobs", "jobs"]
+        while len(forms) < 3:
+            forms.append(forms[-1])
+
+        if msgs.plural_rule == "slavic":
+            if 11 <= n % 100 <= 14:
+                return forms[2]
+            last = n % 10
+            if last == 1:
+                return forms[0]
+            if 2 <= last <= 4:
+                return forms[1]
+            return forms[2]
+        return forms[0] if n == 1 else forms[1]
 
     async def _notify_run_failure(
         self, job: CronJob, error_text: str, auth_down: bool,
@@ -850,14 +861,10 @@ class CronService:
             if self._auth_down_notified:
                 return
             self._auth_down_notified = True
+            msgs = self.config.cron.messages
             await self._notify_system(
-                title="Токены кончились — кроны на паузе",
-                body=(
-                    f"🍁 Крон {job.id} не смог отработать: провайдер вернул "
-                    "503 (нет доступных токенов)\n"
-                    "🌿 Письма и данные не потеряны — курсоры не сдвинуты\n"
-                    "🌿 Перезапущу автоматически, как только токены вернутся"
-                ),
+                title=msgs.auth_lost_title.format(job=job.id),
+                body=msgs.auth_lost_body.format(job=job.id),
                 priority="urgent",
             )
             return
@@ -869,7 +876,7 @@ class CronService:
             # text). We defensively classify that as "failed" so the cursor
             # buffer is discarded and the messages get reprocessed on the next
             # run — nothing is lost. There is nothing to show the user, so a
-            # loud "упал с ошибкой" alert with an empty body is pure noise.
+            # loud run_failed_* alert with an empty body is pure noise.
             # Log it and stay silent.
             logger.info(
                 "Cron job %s returned an empty completion — treated as a "
@@ -881,9 +888,10 @@ class CronService:
         if len(snippet) > 400:
             snippet = snippet[:400] + "…"
         # is_error=True → renders the 💀 marker centrally. The title stays clean.
+        msgs = self.config.cron.messages
         await self._notify_system(
-            title=f"Крон {job.id} упал с ошибкой",
-            body=f"🍁 {snippet}",
+            title=msgs.run_failed_title.format(job=job.id, error=snippet),
+            body=msgs.run_failed_body.format(job=job.id, error=snippet),
             priority="high",
             is_error=True,
         )
@@ -964,7 +972,8 @@ class CronService:
         reconstructed = self._auth_outage_reconstructed
         self._auth_outage_reconstructed = False
         if fired:
-            lines = "\n".join(f"🌿 {jid}" for jid in fired)
+            msgs = self.config.cron.messages
+            lines = "\n".join(f"{msgs.line_prefix}{jid}" for jid in fired)
             n = len(fired)
             plural = self._plural_cron(n)
             if reconstructed:
@@ -972,14 +981,13 @@ class CronService:
                 # "tokens gone" alert this session, so don't claim they came
                 # back. Just report that we're catching up crons that had failed
                 # on auth before the restart.
-                title = "Догоняю отложенные кроны после рестарта"
-                body = (
-                    f"🍁 {n} {plural} падали на токенах до перезапуска — "
-                    f"auth снова доступен, дозапускаю:\n{lines}"
-                )
+                title = msgs.catchup_title.format(n=n, plural=plural, lines=lines)
+                body = msgs.catchup_body.format(n=n, plural=plural, lines=lines)
             else:
-                title = "Токены вернулись — перезапускаю кроны"
-                body = f"🍁 Перезапускаю {n} {plural}:\n{lines}"
+                title = msgs.auth_restored_title.format(
+                    n=n, plural=plural, lines=lines)
+                body = msgs.auth_restored_body.format(
+                    n=n, plural=plural, lines=lines)
             await self._notify_system(
                 title=title,
                 body=body,

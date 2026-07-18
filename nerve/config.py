@@ -636,12 +636,78 @@ class MemoryConfig:
 
 
 @dataclass
+class CronMessagesConfig:
+    """Wording for the cron alerts nerve pushes to Telegram / web.
+
+    These are user-facing sentences, so language, tone and any bullet glyphs
+    are the operator's choice, not the codebase's. Defaults are plain English
+    with no decoration; override whichever keys you care about under
+    ``cron.messages``.
+
+    Templates are ``str.format`` strings. Available fields per key:
+      auth_lost_*      {job}
+      run_failed_*     {job} {error}
+      auth_restored_*  {n} {plural} {lines}
+      catchup_*        {n} {plural} {lines}
+    ``{lines}`` is the affected job ids, one per line, each prefixed with
+    ``line_prefix``.
+    """
+
+    auth_lost_title: str = "Provider out of tokens — cron paused"
+    auth_lost_body: str = (
+        "Cron {job} could not run: the provider returned 503 "
+        "(no tokens available)\n"
+        "Nothing is lost — cursors have not advanced\n"
+        "It will retry automatically once tokens are back"
+    )
+    run_failed_title: str = "Cron {job} failed"
+    run_failed_body: str = "{error}"
+    auth_restored_title: str = "Tokens are back — restarting cron"
+    auth_restored_body: str = "Restarting {n} {plural}:\n{lines}"
+    catchup_title: str = "Catching up deferred cron after restart"
+    catchup_body: str = (
+        "{n} {plural} had failed on auth before the restart — "
+        "auth is available again, running them now:\n{lines}"
+    )
+    line_prefix: str = "- "
+    # (one, few, many). "few"/"many" only differ under the slavic rule.
+    plural_forms: list[str] = field(
+        default_factory=lambda: ["job", "jobs", "jobs"]
+    )
+    # "simple": 1 -> forms[0], anything else -> forms[1] (English and most
+    # Western languages). "slavic": the 1/2-4/5+ rule with the 11-14
+    # exception, which Russian needs (1 крон / 2 крона / 5 кронов).
+    plural_rule: str = "simple"
+
+    @classmethod
+    def from_dict(cls, d: dict) -> CronMessagesConfig:
+        base = cls()
+        forms = d.get("plural_forms") or base.plural_forms
+        return cls(
+            auth_lost_title=str(d.get("auth_lost_title", base.auth_lost_title)),
+            auth_lost_body=str(d.get("auth_lost_body", base.auth_lost_body)),
+            run_failed_title=str(d.get("run_failed_title", base.run_failed_title)),
+            run_failed_body=str(d.get("run_failed_body", base.run_failed_body)),
+            auth_restored_title=str(
+                d.get("auth_restored_title", base.auth_restored_title)),
+            auth_restored_body=str(
+                d.get("auth_restored_body", base.auth_restored_body)),
+            catchup_title=str(d.get("catchup_title", base.catchup_title)),
+            catchup_body=str(d.get("catchup_body", base.catchup_body)),
+            line_prefix=str(d.get("line_prefix", base.line_prefix)),
+            plural_forms=[str(f) for f in forms],
+            plural_rule=str(d.get("plural_rule", base.plural_rule)),
+        )
+
+
+@dataclass
 class CronConfig:
     jobs_file: Path = field(default_factory=lambda: Path("~/.nerve/cron/jobs.yaml"))
     system_file: Path = field(default_factory=lambda: Path("~/.nerve/cron/system.yaml"))
     # Directory scanned at startup for drop-in custom gate plugins (.py files
     # defining CronGate subclasses). See nerve/cron/gate_plugins.py.
     gate_plugins_dir: Path = field(default_factory=lambda: Path("~/.nerve/cron/gates"))
+    messages: CronMessagesConfig = field(default_factory=CronMessagesConfig)
 
     @classmethod
     def from_dict(cls, d: dict) -> CronConfig:
@@ -649,6 +715,7 @@ class CronConfig:
             jobs_file=_expand_path(d.get("jobs_file", "~/.nerve/cron/jobs.yaml")) or Path("~/.nerve/cron/jobs.yaml"),
             system_file=_expand_path(d.get("system_file", "~/.nerve/cron/system.yaml")) or Path("~/.nerve/cron/system.yaml"),
             gate_plugins_dir=_expand_path(d.get("gate_plugins_dir", "~/.nerve/cron/gates")) or Path("~/.nerve/cron/gates"),
+            messages=CronMessagesConfig.from_dict(d.get("messages", {})),
         )
 
 
