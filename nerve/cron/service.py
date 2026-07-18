@@ -175,6 +175,13 @@ class CronService:
         # cleared on recovery, so a multi-job outage produces ONE token-down
         # notification (plus one token-restored), not one per failing job.
         self._auth_down_notified: bool = False
+        # True when the auth-retry queue was rebuilt from logs after a restart
+        # (see _reconstruct_auth_retry_jobs) rather than filled by a live outage
+        # this process witnessed. In that case the user never saw a "tokens
+        # gone" alert, so the recovery sweep must NOT claim "токены вернулись"
+        # (nothing visibly disappeared) — it phrases the message as catching up
+        # deferred crons instead. Cleared once the recovery message is sent.
+        self._auth_outage_reconstructed: bool = False
 
     async def start(self) -> None:
         """Load jobs and start the scheduler."""
@@ -954,14 +961,28 @@ class CronService:
         # Clear the outage flag so the next token-down failure alerts again,
         # and tell the user which crons we just brought back.
         self._auth_down_notified = False
+        reconstructed = self._auth_outage_reconstructed
+        self._auth_outage_reconstructed = False
         if fired:
             lines = "\n".join(f"🌿 {jid}" for jid in fired)
+            n = len(fired)
+            plural = self._plural_cron(n)
+            if reconstructed:
+                # Queue rebuilt from logs after a restart: the user never saw a
+                # "tokens gone" alert this session, so don't claim they came
+                # back. Just report that we're catching up crons that had failed
+                # on auth before the restart.
+                title = "Догоняю отложенные кроны после рестарта"
+                body = (
+                    f"🍁 {n} {plural} падали на токенах до перезапуска — "
+                    f"auth снова доступен, дозапускаю:\n{lines}"
+                )
+            else:
+                title = "Токены вернулись — перезапускаю кроны"
+                body = f"🍁 Перезапускаю {n} {plural}:\n{lines}"
             await self._notify_system(
-                title="Токены вернулись — перезапускаю кроны",
-                body=(
-                    f"🍁 Перезапускаю {len(fired)} "
-                    f"{self._plural_cron(len(fired))}:\n{lines}"
-                ),
+                title=title,
+                body=body,
                 priority="high",
             )
 
@@ -997,6 +1018,7 @@ class CronService:
             # The recovery sweep will send the "tokens back" alert and reset
             # this flag once auth returns.
             self._auth_down_notified = True
+            self._auth_outage_reconstructed = True
             logger.info(
                 "Reconstructed auth-retry queue from logs: %s",
                 sorted(self._auth_retry_jobs),
