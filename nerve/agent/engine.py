@@ -979,68 +979,11 @@ class AgentEngine:
     #  SDK client lifecycle                                                #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _is_client_dead(client: ClaudeSDKClient) -> bool:
-        """Check if the client's underlying CLI process has terminated."""
-        transport = getattr(client, "_transport", None)
-        if not transport:
-            return True
-        process = getattr(transport, "_process", None)
-        if process is None:
-            return True
-        return process.returncode is not None
-
-    def _sdk_resume_file_exists(self, sdk_session_id: str) -> bool:
-        """Check whether Claude Code still has the conversation .jsonl
-        for the given SDK session ID on this filesystem.
-
-        The CLI stores history at::
-
-            ~/.claude/projects/<encoded-cwd>/<sdk_session_id>.jsonl
-
-        where <encoded-cwd> is the absolute cwd path with every '/'
-        replaced by '-'.  The CLI resolves the cwd symlink before
-        encoding, so when the workspace is itself a symlink (e.g. the
-        Docker deployment's /root/nerve-workspace -> /Users/.../
-        nerve-workspace) the history lives under the *realpath*-encoded
-        directory, not the symlink-encoded one.  Check the realpath
-        first and fall back to the unresolved path for non-symlinked
-        layouts.
-
-        If the file is gone (typically because the container's
-        /root/.claude was not bind-mounted and got wiped on restart),
-        passing --resume to the CLI fails with exit 1.
-
-        Best-effort check: any unexpected error returns True so we still
-        attempt the resume and let the CLI surface the real error,
-        rather than masking unrelated bugs.
-        """
-        try:
-            projects = os.path.expanduser("~/.claude/projects")
-            workspace = str(self.config.workspace)
-            bases = [os.path.realpath(workspace)]
-            if workspace not in bases:
-                bases.append(workspace)
-            for base in bases:
-                encoded = base.replace("/", "-")
-                jsonl = (
-                    projects + "/" + encoded
-                    + "/" + sdk_session_id + ".jsonl"
-                )
-                if os.path.isfile(jsonl):
-                    return True
-            return False
-        except Exception as e:
-            logger.debug(
-                "Could not stat resume jsonl for %s: %s, assuming present",
-                sdk_session_id[:12], e,
-            )
-            return True
-
     def _resume_jsonl_path(self, sdk_session_id: str) -> str | None:
         """Return the path to the resume target's conversation .jsonl, or
-        None if it can't be located. Mirrors the realpath/symlink resolution
-        used by ``_sdk_resume_file_exists``."""
+        None if it can't be located. Resolves the workspace realpath first and
+        falls back to the unresolved path, matching how the CLI encodes
+        ``~/.claude/projects/<encoded-cwd>/<id>.jsonl``."""
         try:
             projects = os.path.expanduser("~/.claude/projects")
             workspace = str(self.config.workspace)
