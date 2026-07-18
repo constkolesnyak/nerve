@@ -60,3 +60,9 @@ Thumbs.db
 
 # Local planning docs — not for PRs
 docs/plans/
+
+# Junk a test writes when a MagicMock config reaches a Path(...).mkdir call
+# (dir name is the mock repr, e.g. MagicMock/mock.codex.home_dir/<id>).
+# Culprit not yet identified — only reproduces in a full-suite run, which
+# reboots the Pi, so this keeps it out of commits meanwhile.
+MagicMock/

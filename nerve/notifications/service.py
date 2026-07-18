@@ -816,9 +816,9 @@ class NotificationService:
         web NotificationCard can render readable button text while the
         button click still sends the canonical ``value`` back through
         the answer endpoint. ``is_error`` lets the web client render an
-        error style, matching the 💀 marker used on Telegram.
-        the answer endpoint. ``extra`` fields (e.g. ``redelivered``)
-        are merged into the payload verbatim.
+        error style, matching the 💀 marker used on Telegram. ``extra``
+        fields (e.g. ``redelivered``) are merged into the payload
+        verbatim.
         """
         from nerve.agent.streaming import broadcaster
         message = {
