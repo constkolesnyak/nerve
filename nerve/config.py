@@ -767,6 +767,11 @@ class NotificationsConfig:
     # can be any importance, but it always renders with this prefix so 💀
     # consistently means "something failed" across every channel.
     error_prefix: str = "💀 "
+    # Output language for <YYYY-MM-DD> / <dow:> placeholders rendered into
+    # notification text: "en" (default), "ru", "de". Placeholder *parsing*
+    # stays multilingual regardless. The English default keeps the code free
+    # of any one user's language; set it in config instead.
+    date_locale: str = "en"
 
     @classmethod
     def from_dict(cls, d: dict) -> NotificationsConfig:
@@ -780,6 +785,7 @@ class NotificationsConfig:
                 "urgent": "🚨 ",
             }),
             error_prefix=d.get("error_prefix", "💀 "),
+            date_locale=str(d.get("date_locale", "en")),
         )
 
 
