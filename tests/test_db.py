@@ -1411,7 +1411,7 @@ class TestCronLogSessionBackfill:
 
     @pytest.mark.asyncio
     async def test_backfill_matches_runs_and_persistent(self, db: Database):
-        from nerve.db.migrations import v035_backfill_cron_log_sessions as v034
+        from nerve.db.migrations import v034_backfill_cron_log_sessions as v034
 
         # Per-run session + a matching log row one second later.
         await db.create_session("cron:iso-job:20260110-120000", source="cron")
@@ -1456,7 +1456,7 @@ class TestCronLogSessionBackfill:
 
     @pytest.mark.asyncio
     async def test_backfill_does_not_touch_existing_links(self, db: Database):
-        from nerve.db.migrations import v035_backfill_cron_log_sessions as v034
+        from nerve.db.migrations import v034_backfill_cron_log_sessions as v034
 
         await db.create_session("cron:job-x:20260110-120000", source="cron")
         log_id = await db.log_cron_start("job-x")
@@ -1472,7 +1472,7 @@ class TestCronLogSessionBackfill:
 
     @pytest.mark.asyncio
     async def test_backfill_picks_closest_run(self, db: Database):
-        from nerve.db.migrations import v035_backfill_cron_log_sessions as v034
+        from nerve.db.migrations import v034_backfill_cron_log_sessions as v034
 
         await db.create_session("cron:multi:20260110-120000", source="cron")
         await db.create_session("cron:multi:20260110-120130", source="cron")

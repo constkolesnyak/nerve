@@ -1229,7 +1229,7 @@ class TestRotationEpoch:
     resume id — which includes every nerve restart. Timing rotation off it
     means a restart landing past today's rotate-at boundary pushes the epoch
     past the boundary too, and rotation never fires for the rest of that day
-    (see v027_session_last_rotated). `connected_at` stays as the fallback for
+    (see v900_session_last_rotated). `connected_at` stays as the fallback for
     legacy sessions that carry no rotation history.
     """
 

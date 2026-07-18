@@ -1,4 +1,4 @@
-"""V33: Fix the tasks_fts join-key format — unify on the raw task_id.
+"""V32: Fix the tasks_fts join-key format — unify on the raw task_id.
 
 A regression made ``upsert_task`` store the FTS join key as a space-normalized
 slug (``task_id`` with hyphens replaced by spaces) while the reseed path and the

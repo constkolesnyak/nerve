@@ -1,4 +1,4 @@
-"""V32: Session wakeups (ScheduleWakeup harness).
+"""V31: Session wakeups (ScheduleWakeup harness).
 
 Adds a ``session_wakeups`` table that records self-scheduled wakeups
 requested by the model via the ``ScheduleWakeup`` tool.

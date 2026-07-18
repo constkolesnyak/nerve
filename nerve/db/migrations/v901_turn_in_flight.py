@@ -1,4 +1,4 @@
-"""V38: Persisted in-flight-turn marker on sessions.
+"""V901: Persisted in-flight-turn marker on sessions.
 
 Records that a session has a turn actively executing, so an interrupted
 turn can be detected and resumed after a restart.
@@ -39,4 +39,4 @@ async def up(db: aiosqlite.Connection) -> None:
         """CREATE INDEX IF NOT EXISTS idx_sessions_turn_in_flight
                ON sessions (turn_in_flight)"""
     )
-    logger.info("v038: added sessions.turn_in_flight / turn_started_at")
+    logger.info("v901: added sessions.turn_in_flight / turn_started_at")

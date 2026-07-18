@@ -1,4 +1,4 @@
-"""V31: Configurable task statuses.
+"""V30: Configurable task statuses.
 
 Adds a ``task_statuses`` table holding the set of statuses a task may
 take, each with a display label, color (hex), optional description, a

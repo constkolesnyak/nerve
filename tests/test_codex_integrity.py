@@ -9,7 +9,7 @@ import pytest
 from nerve.agent.engine import AgentEngine
 from nerve.agent.sessions import SessionManager
 from nerve.config import NerveConfig
-from nerve.db.migrations.v041_codex_integrity import up as apply_v041
+from nerve.db.migrations.v039_codex_integrity import up as apply_v039
 
 pytestmark = pytest.mark.asyncio
 
@@ -17,7 +17,7 @@ pytestmark = pytest.mark.asyncio
 async def test_v039_backfills_null_backend_to_claude(db):
     await db.create_session("legacy", backend="claude")
     await db._write("UPDATE sessions SET backend = NULL WHERE id = ?", ("legacy",))
-    await apply_v041(db.db)
+    await apply_v039(db.db)
     await db.db.commit()
     row = await db.get_session("legacy")
     assert row["backend"] == "claude"

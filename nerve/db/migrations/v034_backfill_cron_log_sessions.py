@@ -1,4 +1,4 @@
-"""V35: Backfill cron_logs.session_id for runs recorded before v34.
+"""V34: Backfill cron_logs.session_id for runs recorded before v34.
 
 V34 added the column but only new runs populate it. Historical rows can be
 recovered because isolated cron sessions encode their run timestamp in the

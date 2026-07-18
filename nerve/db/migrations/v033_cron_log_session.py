@@ -1,4 +1,4 @@
-"""V34: Link cron run logs to their agent sessions.
+"""V33: Link cron run logs to their agent sessions.
 
 Adds ``cron_logs.session_id`` so each run can be traced to the session it
 executed in (``cron:<job>`` for persistent jobs, ``cron:<job>:<run>`` for

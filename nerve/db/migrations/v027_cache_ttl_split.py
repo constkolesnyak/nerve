@@ -1,4 +1,4 @@
-"""V30: Split cache_creation tokens by TTL (5-minute vs 1-hour).
+"""V27: Split cache_creation tokens by TTL (5-minute vs 1-hour).
 
 The Anthropic API returns ``cache_creation: {ephemeral_5m_input_tokens,
 ephemeral_1h_input_tokens}`` alongside the legacy aggregate
@@ -11,7 +11,7 @@ default to 0 — historical aggregates remain in
 ``cache_creation_input_tokens`` and can still be summed.
 
 History note: this was originally numbered v027 but collided with
-``v027_session_last_rotated``. The previous migration runner tracked
+``v900_session_last_rotated``. The previous migration runner tracked
 only ``MAX(version)``, so on databases where the *other* v027 was
 applied first this one was silently skipped, breaking usage tracking
 end-to-end. Renumbering to v030 lets the runner pick it up again on
@@ -45,11 +45,11 @@ async def up(db: aiosqlite.Connection) -> None:
         )
 
     if not statements:
-        logger.info("v030: 5m/1h ephemeral cache columns already present, skipping")
+        logger.info("v027: 5m/1h ephemeral cache columns already present, skipping")
         return
 
     for stmt in statements:
         await db.execute(stmt)
     logger.info(
-        "v030: added %d ephemeral cache column(s) to session_usage", len(statements)
+        "v027: added %d ephemeral cache column(s) to session_usage", len(statements)
     )

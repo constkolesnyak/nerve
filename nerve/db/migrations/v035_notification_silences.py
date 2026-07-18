@@ -1,4 +1,4 @@
-"""V36: Notification silences — deterministic suppression of known-benign alerts.
+"""V35: Notification silences — deterministic suppression of known-benign alerts.
 
 Adds the ``notification_silences`` table: a small set of regex rules that
 the notification service consults before fanning a ``notify`` out to

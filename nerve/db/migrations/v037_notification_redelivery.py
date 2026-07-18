@@ -1,4 +1,4 @@
-"""V39: Add re-delivery columns to notifications.
+"""V37: Add re-delivery columns to notifications.
 
 Completes the snooze lifecycle for ``question``/``approval`` rows. Until
 now, snoozing only advanced ``expires_at`` — the row sat pending and
@@ -42,5 +42,5 @@ async def up(db: aiosqlite.Connection) -> None:
         "ON notifications(status, redeliver_at)"
     )
     logger.info(
-        "v039: added redeliver_at/redelivery_count to notifications + index"
+        "v037: added redeliver_at/redelivery_count to notifications + index"
     )

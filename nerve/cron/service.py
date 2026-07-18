@@ -520,7 +520,7 @@ class CronService:
         re-stamped whenever the session reconnects without an SDK resume id
         (every nerve restart), so a restart past today's rotate-at boundary
         would suppress rotation for the rest of the day — see
-        v027_session_last_rotated.
+        v900_session_last_rotated.
 
         If rotate_at is set (e.g. "04:00"), rotation happens once per day
         at that local time instead of using the hours-based approach.
