@@ -1,4 +1,4 @@
-"""V38: Track each session's agent backend.
+"""V40: Track each session's agent backend.
 
 Multi-backend support (docs/plans/codex-backend.md): a session created
 on one backend (claude / codex) must never be resumed on another — the
@@ -23,4 +23,4 @@ logger = logging.getLogger(__name__)
 
 async def up(db: aiosqlite.Connection) -> None:
     await db.execute("ALTER TABLE sessions ADD COLUMN backend TEXT")
-    logger.info("v038: added sessions.backend")
+    logger.info("v040: added sessions.backend")

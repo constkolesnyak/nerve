@@ -1,4 +1,4 @@
-"""V39: Make Codex session identity and accounting explicit.
+"""V41: Make Codex session identity and accounting explicit.
 
 The first Codex backend migration deliberately left legacy ``backend``
 values NULL and relied on a read-time default.  That is unsafe once the
@@ -43,7 +43,7 @@ async def up(db: aiosqlite.Connection) -> None:
         )
 
     # Every session created before backend selection existed was a Claude
-    # session.  This must be a data migration (v038 may already be applied).
+    # session.  This must be a data migration (v040 may already be applied).
     await db.execute(
         "UPDATE sessions SET backend = 'claude' "
         "WHERE backend IS NULL OR TRIM(backend) = ''"
@@ -78,6 +78,6 @@ async def up(db: aiosqlite.Connection) -> None:
         """
     )
     logger.info(
-        "v039: backfilled session backends; added cwd, native turn/thread "
+        "v041: backfilled session backends; added cwd, native turn/thread "
         "mapping, and cost-basis columns"
     )
