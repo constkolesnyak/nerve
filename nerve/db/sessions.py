@@ -48,13 +48,29 @@ class SessionStore:
     async def list_sessions(
         self, limit: int = 50, include_archived: bool = False,
     ) -> list[dict]:
+        """List sessions, most recently updated first.
+
+        Starred sessions are always included regardless of ``limit``;
+        the limit only bounds the non-starred ones.
+        """
         if include_archived:
-            query = "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?"
-            params = (limit,)
+            query = (
+                "SELECT * FROM sessions"
+                " WHERE starred = 1"
+                "    OR id IN (SELECT id FROM sessions WHERE starred = 0"
+                "              ORDER BY updated_at DESC LIMIT ?)"
+                " ORDER BY updated_at DESC"
+            )
         else:
-            query = "SELECT * FROM sessions WHERE status != 'archived' ORDER BY updated_at DESC LIMIT ?"
-            params = (limit,)
-        async with self.db.execute(query, params) as cursor:
+            query = (
+                "SELECT * FROM sessions"
+                " WHERE (starred = 1 AND status != 'archived')"
+                "    OR id IN (SELECT id FROM sessions"
+                "              WHERE starred = 0 AND status != 'archived'"
+                "              ORDER BY updated_at DESC LIMIT ?)"
+                " ORDER BY updated_at DESC"
+            )
+        async with self.db.execute(query, (limit,)) as cursor:
             return [dict(row) async for row in cursor]
 
     async def count_sessions(self, include_archived: bool = False) -> int:
@@ -130,6 +146,12 @@ class SessionStore:
 
         Returns ``None`` when no allowed field is present. Shared by
         :meth:`update_session_fields` and :meth:`update_session_metadata`.
+
+        Deliberately does NOT touch ``updated_at``: it means "last message
+        activity" and is bumped only by the ``add_message*`` methods (and
+        the explicit :meth:`touch_session`). Metadata writes — status flips,
+        open/switch bookkeeping, star/rename, memorization watermarks — must
+        not reorder the session list.
         """
         allowed = {
             "status", "sdk_session_id", "connected_at", "last_activity_at",
@@ -145,8 +167,6 @@ class SessionStore:
                 params.append(value)
         if not set_clauses:
             return None
-        set_clauses.append("updated_at = ?")
-        params.append(datetime.now(timezone.utc).isoformat())
         params.append(session_id)
         return (
             f"UPDATE sessions SET {', '.join(set_clauses)} WHERE id = ?",
@@ -289,13 +309,18 @@ class SessionStore:
     async def get_stale_sessions(
         self, before_iso: str, exclude_ids: list[str] | None = None,
     ) -> list[dict]:
-        """Get idle/stopped/error sessions not updated since before_iso."""
+        """Get idle/stopped/error sessions not updated since before_iso.
+
+        Starred sessions are excluded: a starred session is never
+        auto-archived, regardless of how long it has been idle.
+        """
         excludes = exclude_ids or []
         if excludes:
             placeholders = ",".join("?" for _ in excludes)
             query = f"""
                 SELECT * FROM sessions
                 WHERE status IN ('idle', 'stopped', 'error')
+                AND starred = 0
                 AND updated_at < ?
                 AND id NOT IN ({placeholders})
             """
@@ -304,30 +329,65 @@ class SessionStore:
             query = """
                 SELECT * FROM sessions
                 WHERE status IN ('idle', 'stopped', 'error')
+                AND starred = 0
                 AND updated_at < ?
             """
             params = (before_iso,)
         async with self.db.execute(query, params) as cursor:
             return [dict(row) async for row in cursor]
 
-    async def count_active_sessions(self) -> int:
-        """Count non-archived sessions."""
-        async with self.db.execute(
-            "SELECT COUNT(*) FROM sessions WHERE status != 'archived'"
-        ) as cursor:
+    async def get_stale_interactive_sessions(
+        self, before_iso: str, sources: list[str],
+    ) -> list[dict]:
+        """Idle/stopped/error *interactive* sessions not updated since before_iso.
+
+        Scoped by ``source`` (web/telegram/…) so cron and persistent sessions
+        keep their own long rotation and are never archived at the short
+        interactive cutoff. Starred sessions are also excluded — a starred
+        session is never auto-archived. Returns [] when ``sources`` is empty.
+        """
+        if not sources:
+            return []
+        src = ",".join("?" for _ in sources)
+        query = f"""
+            SELECT * FROM sessions
+            WHERE status IN ('idle', 'stopped', 'error')
+              AND starred = 0
+              AND source IN ({src})
+              AND updated_at < ?
+        """
+        async with self.db.execute(query, (*sources, before_iso)) as cursor:
+            return [dict(row) async for row in cursor]
+
+    async def count_active_sessions(self, exclude_starred: bool = False) -> int:
+        """Count non-archived sessions.
+
+        When ``exclude_starred`` is set, starred sessions are omitted: they are
+        off-budget for the ``max_sessions`` cap, so the overflow check counts
+        only cap-eligible sessions.
+        """
+        query = "SELECT COUNT(*) FROM sessions WHERE status != 'archived'"
+        if exclude_starred:
+            query += " AND starred = 0"
+        async with self.db.execute(query) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else 0
 
     async def get_oldest_sessions(
         self, count: int, exclude_ids: list[str] | None = None,
     ) -> list[dict]:
-        """Get the oldest non-active, non-archived sessions for cleanup."""
+        """Get the oldest non-active, non-archived sessions for cleanup.
+
+        Starred sessions are excluded: they are never evicted to enforce the
+        session-count limit.
+        """
         excludes = exclude_ids or []
         if excludes:
             placeholders = ",".join("?" for _ in excludes)
             query = f"""
                 SELECT * FROM sessions
                 WHERE status NOT IN ('active', 'archived')
+                AND starred = 0
                 AND id NOT IN ({placeholders})
                 ORDER BY updated_at ASC LIMIT ?
             """
@@ -336,6 +396,7 @@ class SessionStore:
             query = """
                 SELECT * FROM sessions
                 WHERE status NOT IN ('active', 'archived')
+                AND starred = 0
                 ORDER BY updated_at ASC LIMIT ?
             """
             params = (count,)
