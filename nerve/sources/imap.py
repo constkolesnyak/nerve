@@ -4,20 +4,26 @@ Each ImapSource instance handles ONE mailbox with its own cursor. The
 registry creates one instance per configured account, so each gets
 independent cursor tracking in the DB.
 
-Primary use case: Deutsche Post "Briefankündigung" — a free German service
-that emails a daily preview scan of the FRONT of envelopes that will be
-delivered soon. The letter contents are NOT scanned; the sender is only
-visible in the inline envelope image. For those emails we run a multimodal
-vision pass (Haiku) at ingest time to read the sender off the envelope, so
-the inbox-processor cron gets plain text it can act on. If the image is
-missing or vision fails, we fall back to "a physical letter is on its way".
-
 Cursor semantics: ``<UIDVALIDITY>:<max_uid>``. IMAP UIDs are only stable
 within a given UIDVALIDITY; if the server resets it, we detect the mismatch
 and re-baseline from a SINCE lookback window instead of trusting old UIDs.
 
 imaplib is blocking, so the whole IMAP conversation runs in a worker thread
-via ``asyncio.to_thread``. The vision enrichment is async (AsyncAnthropic).
+via ``asyncio.to_thread``.
+
+Optional image pass
+-------------------
+
+Some mail carries its payload only as an inline image — a scan, a photo, a
+rendered document — so the text an agent would act on is not in the body at
+all. For those messages the source can run a multimodal model over the image
+at ingest time and fold the answer into the record, so downstream consumers
+get plain text.
+
+Which messages that applies to, what to ask the model, and how to word the
+result are entirely configuration (``sync.imap.match`` / ``sync.imap.vision``).
+With no match rules configured nothing is singled out and this is a plain
+IMAP mailbox source. See ``docs/sources.md`` for a worked example.
 """
 
 from __future__ import annotations
@@ -29,33 +35,13 @@ import logging
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 from email.message import Message
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from nerve.sources.base import Source
 from nerve.sources.gmail import _html_to_text, _parse_to_epoch
 from nerve.sources.models import FetchResult, SourceRecord
 
 logger = logging.getLogger(__name__)
-
-# Deutsche Post Briefankündigung fingerprints. Match on sender domain OR an
-# inline image whose Content-ID / filename mentions the envelope ("Umschlag").
-_DP_SENDER_HINTS = (
-    "deutschepost",
-    "brief.deutschepost",
-    "briefankuendigung",
-    "briefankündigung",
-)
-_ENVELOPE_IMG_HINTS = ("umschlag", "envelope", "briefankuend")
-
-_VISION_PROMPT = (
-    "Ты смотришь на скан ЛИЦЕВОЙ стороны конверта бумажного письма "
-    "(Deutsche Post Briefankündigung). Определи ОТПРАВИТЕЛЯ письма — обычно "
-    "он напечатан мелким шрифтом в верхней части конверта или в окошке "
-    "отправителя. Ответь СТРОГО двумя строками на русском:\n"
-    "Отправитель: <название компании/человека, или «не разобрать»>\n"
-    "Тип: <одно-два слова: банк / страховая / госорган / счёт / реклама / "
-    "личное / не ясно>"
-)
 
 
 class ImapSource(Source):
@@ -70,10 +56,9 @@ class ImapSource(Source):
         label: str,
         port: int = 993,
         mailbox: str = "INBOX",
-        analyze_envelopes: bool = True,
-        envelope_only: bool = False,
         initial_lookback_days: int = 1,
-        vision_model: str = "",
+        match: Any | None = None,
+        vision: Any | None = None,
         vision_client_factory: Callable[[], Any] | None = None,
     ):
         self.host = host
@@ -83,17 +68,22 @@ class ImapSource(Source):
         self.mailbox = mailbox
         self.label = label
         self.source_name = f"imap:{label}"
-        self.analyze_envelopes = analyze_envelopes
-        # When True, only Deutsche Post envelope-scan announcements are emitted;
-        # all other mail (ads, spam, provider system mail) is dropped at the
-        # source and never reaches the inbox.
-        self.envelope_only = envelope_only
         self.initial_lookback_days = max(1, int(initial_lookback_days))
-        self.vision_model = vision_model
         self._vision_client_factory = vision_client_factory
 
+        # Match rules decide which messages are "of interest"; the vision
+        # block decides what to do with them. Both default to inert, so an
+        # unconfigured source is a plain mailbox reader.
+        if match is None or vision is None:
+            from nerve.config import ImapMatchConfig, ImapVisionConfig
+
+            match = ImapMatchConfig() if match is None else match
+            vision = ImapVisionConfig() if vision is None else vision
+        self.match = match
+        self.vision = vision
+
     async def fetch(self, cursor: str | None, limit: int = 100) -> FetchResult:
-        """Fetch new messages since cursor and enrich Deutsche Post envelopes."""
+        """Fetch new messages since cursor, running the image pass on matches."""
         try:
             parsed, next_cursor = await asyncio.to_thread(
                 self._imap_fetch_blocking, cursor, limit,
@@ -104,18 +94,18 @@ class ImapSource(Source):
 
         records: list[SourceRecord] = []
         for msg in parsed:
-            # Envelope-only mode: drop everything that isn't a physical-letter
-            # announcement before it ever reaches the inbox.
-            if self.envelope_only and not msg.get("is_envelope"):
+            # only_matched: drop everything the rules did not single out
+            # before it ever reaches the inbox.
+            if self.match.only_matched and not msg.get("matched"):
                 logger.debug(
-                    "IMAP %s: dropping non-envelope message %s (envelope_only)",
+                    "IMAP %s: dropping unmatched message %s (only_matched)",
                     self.source_name, msg.get("id"),
                 )
                 continue
-            if msg.get("is_envelope") and self.analyze_envelopes:
-                summary, content = await self._build_envelope_record(msg)
-            elif msg.get("is_envelope"):
-                summary, content = self._envelope_fallback(msg)
+            if msg.get("matched") and self.vision.enabled:
+                summary, content = await self._build_vision_record(msg)
+            elif msg.get("matched"):
+                summary, content = self._vision_fallback(msg)
             else:
                 summary, content = self._plain_record(msg)
 
@@ -130,7 +120,7 @@ class ImapSource(Source):
                     "account": self.username,
                     "label": self.label,
                     "mailbox": self.mailbox,
-                    "is_envelope": bool(msg.get("is_envelope")),
+                    "matched": bool(msg.get("matched")),
                     "from": msg.get("from", ""),
                 },
             ))
@@ -245,12 +235,13 @@ class ImapSource(Source):
             else datetime.now(timezone.utc).isoformat()
         )
 
-        body, envelope_png, envelope_mt, img_hint = _extract_parts(msg)
+        body, image, media_type, attachment_hit = _extract_parts(
+            msg, self.match.attachment_contains,
+        )
 
         sender_l = sender.lower()
-        is_envelope = (
-            any(h in sender_l for h in _DP_SENDER_HINTS)
-            or img_hint
+        matched = attachment_hit or any(
+            h.lower() in sender_l for h in self.match.sender_contains if h
         )
 
         return {
@@ -260,55 +251,62 @@ class ImapSource(Source):
             "date": date_str,
             "timestamp": timestamp,
             "body": body,
-            "is_envelope": bool(is_envelope),
-            "envelope_png": envelope_png,
-            "envelope_media_type": envelope_mt,
+            "matched": bool(matched),
+            "image": image,
+            "media_type": media_type,
         }
 
     # ------------------------------------------------------------------
     # Record builders
     # ------------------------------------------------------------------
 
-    async def _build_envelope_record(self, msg: dict) -> tuple[str, str]:
-        """Run vision on the envelope image; fall back to a generic notice."""
-        png = msg.get("envelope_png")
-        media_type = msg.get("envelope_media_type") or "image/png"
-        if not png or not self._vision_client_factory or not self.vision_model:
-            return self._envelope_fallback(msg)
+    async def _build_vision_record(self, msg: dict) -> tuple[str, str]:
+        """Run the image pass on a matched message; fall back if it can't."""
+        image = msg.get("image")
+        media_type = msg.get("media_type") or "image/png"
+        if not image or not self._vision_client_factory or not self.vision.model:
+            return self._vision_fallback(msg)
 
         try:
-            vision_text = await self._analyze_envelope(png, media_type)
+            vision_text = await self._analyze_image(image, media_type)
         except Exception as e:
             logger.warning(
-                "IMAP %s: envelope vision failed: %s", self.source_name, e,
+                "IMAP %s: image analysis failed: %s", self.source_name, e,
             )
-            return self._envelope_fallback(msg)
+            return self._vision_fallback(msg)
 
         if not vision_text:
-            return self._envelope_fallback(msg)
+            return self._vision_fallback(msg)
 
-        sender_line = _first_line_after(vision_text, "Отправитель:") or "не разобрать"
-        summary = f"[{self.label}] 📬 Физписьмо: {sender_line}"
-        content = (
-            "Deutsche Post Briefankündigung — анонс бумажного письма "
-            "(доставка в ближайшие дни).\n"
-            f"Отправитель по конверту:\n{vision_text}\n\n"
-            f"Subject: {msg.get('subject', '')}\n"
-            f"Date: {msg.get('date', '')}"
-        )
-        return summary, content
+        v = self.vision
+        # answer_key is the label the prompt asked the model to emit; with no
+        # key configured, take the first non-empty line of the answer.
+        answer = (
+            _first_line_after(vision_text, v.answer_key)
+            if v.answer_key
+            else _first_nonempty_line(vision_text)
+        ) or v.unknown_answer
+        fields = self._template_fields(msg, vision=vision_text, answer=answer)
+        return _format(v.summary, fields), _format(v.content, fields)
 
-    def _envelope_fallback(self, msg: dict) -> tuple[str, str]:
-        summary = f"[{self.label}] 📬 Тебе идёт физическое письмо"
-        content = (
-            "Deutsche Post Briefankündigung — анонс бумажного письма "
-            "(доставка в ближайшие дни).\n"
-            "Отправитель по конверту не распознан "
-            "(изображение отсутствует или не читается).\n\n"
-            f"Subject: {msg.get('subject', '')}\n"
-            f"Date: {msg.get('date', '')}"
+    def _vision_fallback(self, msg: dict) -> tuple[str, str]:
+        v = self.vision
+        fields = self._template_fields(
+            msg, vision="", answer=v.unknown_answer,
         )
-        return summary, content
+        return _format(v.summary_unknown, fields), _format(v.content_unknown, fields)
+
+    def _template_fields(self, msg: dict, *, vision: str, answer: str) -> dict:
+        """Placeholders available to every configured wording template."""
+        return {
+            "label": self.label,
+            "answer": answer,
+            "vision": vision,
+            "subject": msg.get("subject", ""),
+            "sender": msg.get("from", ""),
+            "date": msg.get("date", ""),
+            "body": msg.get("body", ""),
+        }
 
     def _plain_record(self, msg: dict) -> tuple[str, str]:
         subject = msg.get("subject", "(no subject)")
@@ -322,15 +320,15 @@ class ImapSource(Source):
         )
         return summary, content
 
-    async def _analyze_envelope(self, png: bytes, media_type: str) -> str:
-        """Send the envelope image to the multimodal model and return its text."""
+    async def _analyze_image(self, image: bytes, media_type: str) -> str:
+        """Send the image to the multimodal model and return its text."""
         import base64
 
         client = self._vision_client_factory()
-        b64 = base64.standard_b64encode(png).decode("ascii")
+        b64 = base64.standard_b64encode(image).decode("ascii")
         try:
             resp = await client.messages.create(
-                model=self.vision_model,
+                model=self.vision.model,
                 max_tokens=300,
                 messages=[{
                     "role": "user",
@@ -343,7 +341,7 @@ class ImapSource(Source):
                                 "data": b64,
                             },
                         },
-                        {"type": "text", "text": _VISION_PROMPT},
+                        {"type": "text", "text": self.vision.prompt},
                     ],
                 }],
             )
@@ -408,18 +406,22 @@ def _part_text(part: Message) -> str:
         return payload.decode("utf-8", errors="replace")
 
 
-def _extract_parts(msg: Message) -> tuple[str, bytes | None, str | None, bool]:
-    """Walk a message and extract body text + the best envelope image.
+def _extract_parts(
+    msg: Message, attachment_hints: Sequence[str] = (),
+) -> tuple[str, bytes | None, str | None, bool]:
+    """Walk a message and extract body text + the most relevant image.
 
-    Returns ``(body_text, envelope_png_bytes, media_type, img_hint_matched)``.
-    ``img_hint_matched`` is True when an inline image's Content-ID/filename
-    looked like a Deutsche Post envelope scan.
+    Returns ``(body_text, image_bytes, media_type, attachment_hit)``.
+    ``attachment_hit`` is True when an inline image's Content-ID or filename
+    contains one of *attachment_hints* — that image then wins over the merely
+    largest one, which is the fallback candidate.
     """
     text_plain: str | None = None
     text_html: str | None = None
     best_img: tuple[bytes, str] | None = None      # (bytes, media_type)
     hinted_img: tuple[bytes, str] | None = None
-    img_hint = False
+    hints = [h.lower() for h in attachment_hints if h]
+    attachment_hit = False
 
     if msg.is_multipart():
         for part in msg.walk():
@@ -439,11 +441,11 @@ def _extract_parts(msg: Message) -> tuple[str, bytes | None, str | None, bool]:
                 cid = str(part.get("Content-ID") or "").lower()
                 fname = str(part.get_filename() or "").lower()
                 marker = f"{cid} {fname}"
-                # Track the largest image as a fallback envelope candidate.
+                # Track the largest image as a fallback candidate.
                 if best_img is None or len(payload) > len(best_img[0]):
                     best_img = (payload, ctype)
-                if any(h in marker for h in _ENVELOPE_IMG_HINTS):
-                    img_hint = True
+                if any(h in marker for h in hints):
+                    attachment_hit = True
                     hinted_img = (payload, ctype)
     else:
         ctype = (msg.get_content_type() or "").lower()
@@ -459,10 +461,10 @@ def _extract_parts(msg: Message) -> tuple[str, bytes | None, str | None, bool]:
     else:
         body = ""
 
-    envelope = hinted_img or best_img
-    if envelope:
-        return body, envelope[0], envelope[1], img_hint
-    return body, None, None, img_hint
+    image = hinted_img or best_img
+    if image:
+        return body, image[0], image[1], attachment_hit
+    return body, None, None, attachment_hit
 
 
 def _first_line_after(text: str, marker: str) -> str:
@@ -471,3 +473,25 @@ def _first_line_after(text: str, marker: str) -> str:
         if marker in line:
             return line.split(marker, 1)[1].strip()
     return ""
+
+
+def _first_nonempty_line(text: str) -> str:
+    """Return the first line of *text* that carries anything."""
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _format(template: str, fields: dict) -> str:
+    """Fill a configured wording template, surviving a bad placeholder.
+
+    A typo in config would otherwise raise mid-fetch and lose the whole
+    batch, so an unknown ``{placeholder}`` leaves the template visible
+    instead — the operator sees their own broken wording in the inbox.
+    """
+    try:
+        return template.format(**fields)
+    except (KeyError, IndexError, ValueError) as e:
+        logger.warning("IMAP: bad placeholder in configured template (%s)", e)
+        return template

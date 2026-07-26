@@ -88,7 +88,22 @@ def build_source_runners(
     # username, so no credential ever sits in the tracked config.
     imap = config.sync.imap
     if imap.enabled and imap.accounts:
+        import dataclasses
+
         from nerve.sources.imap import ImapSource
+
+        # The image pass needs a prompt to send; without one it would ask the
+        # model nothing and label every message unreadable, so treat a missing
+        # prompt as "not configured" and say so once.
+        vision = dataclasses.replace(
+            imap.vision, model=imap.vision.model or config.memory.fast_model,
+        )
+        if vision.enabled and not vision.prompt:
+            logger.warning(
+                "sync.imap.vision.enabled is set but vision.prompt is empty — "
+                "the image pass stays off",
+            )
+            vision = dataclasses.replace(vision, enabled=False)
 
         for account in imap.accounts:
             password = imap.passwords.get(account.username, "")
@@ -106,10 +121,9 @@ def build_source_runners(
                 password=password,
                 mailbox=account.mailbox,
                 label=account.label,
-                analyze_envelopes=imap.analyze_envelopes,
-                envelope_only=imap.envelope_only,
                 initial_lookback_days=imap.initial_lookback_days,
-                vision_model=imap.vision_model or config.memory.fast_model,
+                match=imap.match,
+                vision=vision,
                 vision_client_factory=condense_factory,
             )
             runners.append(SourceRunner(
@@ -123,8 +137,9 @@ def build_source_runners(
                 ttl_days=ttl_days,
             ))
             logger.info(
-                "Registered source: %s (batch=%d, envelope_only=%s)",
-                source.source_name, imap.batch_size, imap.envelope_only,
+                "Registered source: %s (batch=%d, only_matched=%s, vision=%s)",
+                source.source_name, imap.batch_size,
+                imap.match.only_matched, vision.enabled,
             )
 
     # GitHub (notifications)
