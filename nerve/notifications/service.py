@@ -307,8 +307,9 @@ class NotificationService:
         the answer is injected as a user message into the originating session.
         """
         notification_id = f"ask-{uuid.uuid4().hex[:8]}"
-        title = render_iso_dates(title)
-        body = render_iso_dates(body)
+        locale = self.config.notifications.date_locale
+        title = render_iso_dates(title, locale=locale)
+        body = render_iso_dates(body, locale=locale)
         hours = expiry_hours or self.config.notifications.default_expiry_hours
         expires_at = (
             datetime.now(timezone.utc) + timedelta(hours=hours)
@@ -356,8 +357,9 @@ class NotificationService:
         Returns ``{"notification_id": <id>, "status": "sent"}``.
         """
         notification_id = f"approval-{uuid.uuid4().hex[:8]}"
-        title = render_iso_dates(title)
-        body = render_iso_dates(body)
+        locale = self.config.notifications.date_locale
+        title = render_iso_dates(title, locale=locale)
+        body = render_iso_dates(body, locale=locale)
 
         # Resolve options. Default to the registered dispatcher's
         # canonical set when none was passed. Falling back to the

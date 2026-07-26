@@ -1,10 +1,10 @@
 """Render ISO date placeholders in notification text.
 
-Models (especially in cron-driven sessions like inbox-processor) regularly
-miscompute weekdays for absolute dates — e.g. writing "24 June (Tue)"
-when 24 June is a Wednesday. Asking the model to "be more careful" or
-embedding a 14-day lookup table in the system prompt both fail: the first
-is unreliable, the second doesn't scale beyond two weeks.
+Models — especially in unattended cron sessions, where nobody is reading
+along — regularly miscompute weekdays for absolute dates, e.g. writing
+"24 June (Tue)" when 24 June is a Wednesday. Asking the model to "be more
+careful" or embedding a 14-day lookup table in the system prompt both fail:
+the first is unreliable, the second doesn't scale beyond two weeks.
 
 Instead, this module follows ``print(f"{x:.2f}")`` logic: the model
 declares semantic intent ("this is an event date") via a placeholder,
@@ -29,23 +29,23 @@ miscounting day deltas — cannot recur here.
 Weekday-name placeholder
 ------------------------
 
-Delivery emails frequently state the estimate as a bare weekday name with
-no calendar date — Amazon's "Dispatched — Arriving Tuesday", DHL's
-"Zustellung am Dienstag". Resolving "Tuesday" to an absolute date is the
-same day-delta arithmetic the model gets wrong (it once kept a stale
-"22 July" from the order-confirmation instead of computing that the
-dispatch email's "Tuesday" meant 21 July). So the model may instead copy
-the weekday name verbatim into a placeholder and let the code resolve it:
+Source material often states a date as a bare weekday name with no calendar
+date — a shipping notice that says only "arriving Tuesday". Resolving that
+to an absolute date is the same day-delta arithmetic the model gets wrong,
+and it has a second failure mode: rather than compute the weekday, the model
+reuses whatever date it saw earlier in the thread. So the model may instead
+copy the weekday name verbatim into a placeholder and let the code resolve
+it:
 
     <dow:Tuesday>          → nearest upcoming Tuesday, e.g. "21 July (Tue)"
 
 Resolution is deterministic: the nearest date whose weekday matches,
-counting forward from ``now`` (today itself counts if it matches). English,
-Russian, and German weekday names (full or common short forms) are
-accepted, since the source email may be in any of them, independent of
-the output locale. Combines with the
-relative label exactly like an absolute date, so a "Tuesday" that lands on
-tomorrow renders "tomorrow, 21 July (Tue)". Unrecognized names are left as-is.
+counting forward from ``now`` (today itself counts if it matches). Weekday
+names in every supported locale are accepted, full or common short forms,
+independent of the output locale — the source the model copied from may be
+in any language. Combines with the relative label exactly like an absolute
+date, so a "Tuesday" that lands on tomorrow renders "tomorrow, 21 July
+(Tue)". Unrecognized names are left as-is.
 
 Malformed placeholders (impossible dates like ``<2026-02-31>``,
 out-of-range hours, wrong digits) are left untouched so the model sees
@@ -64,10 +64,9 @@ from typing import Optional
 #
 # Only the *rendered* side is localized. Placeholder parsing below
 # (``_WEEKDAY_NAMES``) stays multilingual regardless of this setting, because
-# the source email whose weekday the model copied may be in any language.
+# the source whose weekday the model copied may be in any language.
 #
-# Default is English so the module carries no personal preference; pick a
-# language with ``notifications.date_locale`` in config.
+# English is the default; pick another with ``notifications.date_locale``.
 _LOCALES: dict[str, dict[str, object]] = {
     "en": {
         "months": (
@@ -109,9 +108,9 @@ def _locale(name: str | None) -> dict[str, object]:
     """Locale table for ``name``, falling back to English for anything unknown."""
     return _LOCALES.get((name or DEFAULT_LOCALE).lower(), _LOCALES[DEFAULT_LOCALE])
 
-# Weekday name → Python weekday index (Mon=0 .. Sun=6). English, Russian, and
-# German, full and common short forms, since the source email may be in any of
-# them. All keys are lowercase; lookup lowercases its input.
+# Weekday name → Python weekday index (Mon=0 .. Sun=6). Every locale above,
+# full and common short forms, since the source the model copied from may be
+# in any of them. All keys are lowercase; lookup lowercases its input.
 _WEEKDAY_NAMES = {
     # Monday
     "monday": 0, "mon": 0,
