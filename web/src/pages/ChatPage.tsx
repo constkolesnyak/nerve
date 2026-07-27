@@ -151,6 +151,16 @@ export function ChatPage() {
 
   useEffect(() => {
     loadSessions().then(() => {
+      if (sessionId === 'new') {
+        // "/chat/new" is a "start a new chat" URL, not a session id. Switching
+        // to a session literally named "new" strands the view on something the
+        // server has never seen (WS "Session not found", 404 history, empty
+        // composer, nothing in the sidebar, gone on reload). Mint a virtual
+        // chat and replace the URL with its temp id so it behaves exactly like
+        // the "+ New chat" button.
+        handleCreateSession();
+        return;
+      }
       if (sessionId) {
         // URL has explicit session — switch to it
         if (sessionId !== activeSession || messages.length === 0) {
