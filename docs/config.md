@@ -36,10 +36,12 @@ from any working directory:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `agent.model` | string | `claude-opus-4-8` | Primary model for conversations |
+| `agent.model` | string | `claude-opus-5` | Primary model for conversations |
 | `agent.cron_model` | string | `claude-sonnet-4-6` | Model for cron jobs (cheaper) |
+| `agent.models` | list | `[]` | Claude models offered in the composer's model picker. `agent.model` always leads; entries extend the list. Empty → a built-in current-generation list (opus / sonnet / haiku) on the direct Anthropic API; on Bedrock only configured models are offered |
+| `agent.model_aliases` | map | `{opus: claude-opus-5}` | Alias → model ID remapping for the CLI (emitted as `ANTHROPIC_DEFAULT_<ALIAS>_MODEL` env vars). Aliases (`opus`, `sonnet`, `haiku`, `fable`) used in Agent/Workflow tool model options, skill frontmatter, and cron overrides resolve to the mapped ID. Entries merge over the built-in `opus → claude-opus-5` default (not applied on Bedrock — set geo-prefixed IDs explicitly there); `""` unsets an alias |
 | `agent.max_turns` | int | `50` | Max agentic turns per request |
-| `agent.max_concurrent` | int | `4` | Max concurrent agent sessions |
+| `agent.max_concurrent` | int | `32` | Max concurrent agent sessions |
 | `agent.cache_ttl` | string | `"5m"` | Prompt-cache write TTL policy: `5m` (status quo), `1h` (always request the 1-hour TTL), or `auto` (per session at client-build time: sparse-cadence sessions — persistent crons, wakeup loops, spaced chats — get `1h`; dense sessions stay on `5m`). Per-cron-job override via `cache_ttl` in jobs.yaml. See `nerve/agent/cache_policy.py` |
 | `agent.cache_ttl_excluded_models` | list | `[]` | Model-name substrings that never request the 1h TTL |
 | `agent.prompt_rewrite.enabled` | bool | `true` | Offer the first-prompt rewrite feature in the web UI (per-user toggle lives in the composer) |
@@ -422,3 +424,23 @@ Manual commands (run regardless of `enabled`):
 |-----|------|---------|-------------|
 | `cron.system_file` | path | `~/.nerve/cron/system.yaml` | System cron jobs (managed by `nerve init`) |
 | `cron.jobs_file` | path | `~/.nerve/cron/jobs.yaml` | User-defined custom cron jobs |
+
+## Workflow Runs
+
+Budget-capped multi-agent jobs (Claude harness `Workflow` tool or Codex
+Ultracode) in dedicated tracked sessions. Nerve meters real dollar spend from
+its own usage accounting, warns at `warn_fraction`, and terminates the run at
+100% of budget — the kill is scoped to the run's own session/subprocess. Each
+run keeps a journal under `runs_dir` (`<run-id>/{run.json,events.ndjson,result.md}`).
+Runs do not survive a daemon restart: a startup recovery pass marks orphaned
+active runs `failed` and notifies. See [workflow-runs.md](workflow-runs.md).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `workflows.enabled` | bool | `true` | Master switch — service, MCP tools, and API |
+| `workflows.runs_dir` | path | `~/.nerve/workflow-runs` | Root for per-run journal directories |
+| `workflows.poll_interval_seconds` | int | `60` | Budget monitor cadence — spend is re-metered (recorded turn costs + live in-flight estimate) every interval (min 5s) |
+| `workflows.warn_fraction` | float | `0.8` | Fraction of `budget_usd` at which the one-time warning notification fires |
+| `workflows.kill_grace_seconds` | int | `30` | After the graceful stop at 100% budget, how long to wait before force-discarding the session's client (kills its subprocess) |
+| `workflows.max_concurrent_runs` | int | `2` | Runs dispatched concurrently; excess queues in status `pending`. Each running workflow occupies one `agent.max_concurrent` slot for its whole turn — keep this well below that limit |
+| `workflows.allow_unbudgeted` | bool | `false` | Permit starting runs without `budget_usd`. Budget enforcement is the point of this surface, so off by default |

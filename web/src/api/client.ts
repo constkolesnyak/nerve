@@ -78,6 +78,128 @@ export interface UltracodeRun {
   cancelled?: number;
 }
 
+// Workflow runs — budgeted autonomous agent runs.
+// Mirrors public_run() in nerve/workflows/service.py (snake_case wire shape).
+export interface WorkflowRunSpec {
+  prompt: string;
+  model?: string;
+  effort?: string;
+  cwd?: string;
+}
+
+export type WorkflowRunStatus =
+  | 'pending'
+  | 'running'
+  | 'done'
+  | 'failed'
+  | 'killed'
+  | 'budget_exhausted';
+
+export interface WorkflowRun {
+  id: string;
+  engine: 'claude-workflow' | 'codex-ultracode';
+  title: string;
+  spec: WorkflowRunSpec;
+  status: WorkflowRunStatus;
+  budget_usd: number | null;
+  spent_usd: number;
+  warned_at: string | null;
+  session_id: string | null;
+  journal_dir: string | null;
+  created_by: string;
+  error: string | null;
+  result: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string;
+}
+
+export interface WorkflowRunJournalEvent {
+  ts: string;
+  run_id: string;
+  event: string;
+  [key: string]: unknown;
+}
+
+// ── Review loops (implement→verify cycles over workflow runs) ──
+
+export type ReviewLoopStatus =
+  | 'pending'
+  | 'implementing'
+  | 'verifying'
+  | 'awaiting_user'
+  | 'passed'
+  | 'failed'
+  | 'killed';
+
+export interface ReviewLoopCriterion {
+  id: string;
+  statement: string;
+  source: 'user' | 'verifier';
+  added_iteration: number;
+  last_status: 'pending' | 'met' | 'unmet' | 'unverifiable';
+}
+
+export interface ReviewLoop {
+  id: string;
+  title: string;
+  session_id: string | null;
+  status: ReviewLoopStatus;
+  failure_reason: string | null;
+  goal_prompt: string;
+  verifier_prompt: string;
+  criteria_adoption: 'no' | 'ask' | 'auto';
+  criteria: ReviewLoopCriterion[];
+  implementer: { engine: string; model?: string; effort?: string };
+  verifier: { engine: string; model?: string; effort?: string };
+  cwd: string | null;
+  max_iterations: number;
+  budget_usd: number;
+  spent_usd: number;
+  iteration: number;
+  current_run_id: string | null;
+  created_at: string;
+  updated_at: string;
+  ended_at: string | null;
+}
+
+export interface ReviewLoopAttempt {
+  id: number;
+  loop_id: string;
+  iteration: number;
+  role: 'implementer' | 'verifier';
+  attempt_no: number;
+  run_id: string;
+  status: string;
+  spend_usd: number;
+  verdict: {
+    verdict?: string;
+    summary?: string;
+    criteria?: { id: string; status: string; evidence?: string; fix_hint?: string }[];
+  } | null;
+  detail: Record<string, unknown> | null;
+  created_at: string;
+  settled_at: string | null;
+}
+
+export interface ReviewLoopCreatePayload {
+  goal: string;
+  verifier: string;
+  budget_usd?: number;
+  max_iterations?: number;
+  criteria_adoption?: 'no' | 'ask' | 'auto';
+  implementer?: { engine?: string; model?: string; effort?: string };
+  verifier_leg?: { engine?: string; model?: string; effort?: string };
+}
+
+export interface WorkflowRunJournal {
+  run_json: Record<string, unknown> | null;
+  events: WorkflowRunJournalEvent[];
+  has_result: boolean;
+  result: string;
+}
+
 let authToken: string | null = localStorage.getItem('nerve_token');
 
 export function setToken(token: string) {
@@ -131,8 +253,9 @@ export const api = {
 
   authStatus: () => request<{ auth_required: boolean }>('/auth/status'),
 
-  // Models — chat models offered to the composer's picker (Anthropic default
-  // plus any locally-installed Ollama models, auto-discovered server-side).
+  // Models — chat models offered to the composer's picker, per backend
+  // (the configured Claude list, Codex app-server models, and any
+  // locally-installed Ollama models, auto-discovered server-side).
   getModels: () =>
     request<{
       default: string;
@@ -151,11 +274,36 @@ export const api = {
   searchSessions: (q: string) =>
     request<{ sessions: any[] }>(`/sessions/search?q=${encodeURIComponent(q)}`),
   getSession: (id: string) => request<any>(`/sessions/${id}`),
-  createSession: (title?: string, backend?: string | null, cwd?: string | null) =>
+  createSession: (title?: string, backend?: string | null, cwd?: string | null, reviewLoop?: ReviewLoopCreatePayload | null, model?: string | null) =>
     request<any>('/sessions', {
       method: 'POST',
-      body: JSON.stringify({ title, ...(backend ? { backend } : {}), ...(cwd ? { cwd } : {}) }),
+      body: JSON.stringify({
+        title,
+        ...(backend ? { backend } : {}),
+        // Composer's model pick — persisted on the session row at creation
+        // so the header badge is right from the first render (omitted →
+        // the backend's default model).
+        ...(model ? { model } : {}),
+        ...(cwd ? { cwd } : {}),
+        ...(reviewLoop ? { review_loop: reviewLoop } : {}),
+      }),
     }),
+  listReviewLoops: (status?: string) =>
+    request<{ loops: ReviewLoop[] }>(`/review-loops${status ? `?status=${status}` : ''}`),
+  getReviewLoop: (loopId: string) =>
+    request<{ loop: ReviewLoop; attempts: ReviewLoopAttempt[] }>(`/review-loops/${loopId}`),
+  killReviewLoop: (loopId: string, reason = '') =>
+    request<ReviewLoop>(`/review-loops/${loopId}/kill`, {
+      method: 'POST', body: JSON.stringify({ reason }),
+    }),
+  decideReviewLoop: (loopId: string, decision: string) =>
+    request<{ ok: boolean; message: string }>(`/review-loops/${loopId}/decision`, {
+      method: 'POST', body: JSON.stringify({ decision }),
+    }),
+  getReviewLoopState: (loopId: string) =>
+    request<{ exists: boolean; truncated: boolean; content: string; path: string }>(
+      `/review-loops/${loopId}/state`,
+    ),
   deleteSession: (id: string) =>
     request<any>(`/sessions/${id}`, { method: 'DELETE' }),
   updateSession: (id: string, data: { title?: string; starred?: boolean }) =>
@@ -393,10 +541,9 @@ export const api = {
   getPlan: (id: string) => request<any>(`/plans/${id}`),
   updatePlan: (id: string, data: { status?: string; feedback?: string }) =>
     request<any>(`/plans/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  approvePlan: (id: string, options?: { runtime?: string; hoa_mode?: string; hoa_agents?: string[]; hoa_pipeline_id?: string }) =>
+  approvePlan: (id: string) =>
     request<{ plan_id: string; impl_session_id: string }>(`/plans/${id}/approve`, {
       method: 'POST',
-      body: JSON.stringify(options || {}),
     }),
   revisePlan: (id: string, feedback: string) =>
     request<any>(`/plans/${id}/revise`, { method: 'POST', body: JSON.stringify({ feedback }) }),
@@ -436,23 +583,6 @@ export const api = {
   deleteSilence: (id: string) =>
     request<any>(`/notifications/silences/${id}`, { method: 'DELETE' }),
 
-  // houseofagents
-  getHoaStatus: () =>
-    request<{ enabled: boolean; available: boolean; version: string | null; default_mode: string; default_agents: string[] }>('/houseofagents/status'),
-  listHoaPipelines: () =>
-    request<{ pipelines: Array<{ id: string; name: string; description: string }> }>('/houseofagents/pipelines'),
-  getHoaPipeline: (id: string) =>
-    request<{ id: string; name: string; content: string; description: string }>(`/houseofagents/pipelines/${id}`),
-  saveHoaPipeline: (id: string, content: string) =>
-    request<{ id: string; path: string }>(`/houseofagents/pipelines/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ content }),
-    }),
-  deleteHoaPipeline: (id: string) =>
-    request<{ deleted: boolean }>(`/houseofagents/pipelines/${id}`, { method: 'DELETE' }),
-  installHoaBinary: () =>
-    request<{ installed: boolean; path: string; version: string }>('/houseofagents/install', { method: 'POST' }),
-
   // Ultracode read-only dashboard
   getUltracodeDashboardStatus: () =>
     request<{ enabled: boolean }>('/codex/ultracode/dashboard'),
@@ -460,6 +590,23 @@ export const api = {
     request<{ runs: UltracodeRun[] }>(`/codex/ultracode/runs?limit=${encodeURIComponent(String(limit))}`),
   getUltracodeRun: (id: string) =>
     request<{ run: UltracodeRun }>(`/codex/ultracode/runs/${encodeURIComponent(id)}`),
+
+  // Workflow runs — budgeted autonomous agent runs
+  listWorkflowRuns: (status?: string, limit = 50) => {
+    const qs = new URLSearchParams();
+    if (status) qs.set('status', status);
+    qs.set('limit', String(limit));
+    return request<{ runs: WorkflowRun[]; total: number }>(`/workflow-runs?${qs}`);
+  },
+  getWorkflowRun: (id: string) =>
+    request<WorkflowRun>(`/workflow-runs/${encodeURIComponent(id)}`),
+  killWorkflowRun: (id: string, reason = '') =>
+    request<WorkflowRun>(`/workflow-runs/${encodeURIComponent(id)}/kill`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+  getWorkflowRunJournal: (id: string) =>
+    request<WorkflowRunJournal>(`/workflow-runs/${encodeURIComponent(id)}/journal`),
 
   // Files
   uploadFiles: async (files: File[], sessionId: string): Promise<{ files: Array<{ id: string; filename: string; media_type: string; file_type: string; size: number }> }> => {

@@ -58,7 +58,6 @@ User reviews (via /plans UI or chat tools)
 - Creates implementation session (`impl-{uuid}`) with full tool access
 - Updates task status to `in_progress`
 - Builds skill-aware prompt (skill plans use `skill_create`/`skill_update` tools)
-- Supports **runtime selection**: when `runtime=houseofagents` is passed, the prompt is augmented with instructions to use the `hoa_execute` MCP tool for multi-agent execution
 - Spawns `engine.run()` in background (unchanged — the agent decides how to implement)
 - Returns `{ plan_id, impl_session_id }`
 
@@ -110,7 +109,7 @@ Defined in `~/.nerve/cron/jobs.yaml` as `task-planner`:
 - **Schedule:** Every 4 hours (`0 */4 * * *`)
 - **Session mode:** Persistent (keeps context for revisions)
 - **Context rotation:** Weekly (168 hours)
-- **Model:** claude-opus-4-8
+- **Model:** claude-opus-5
 
 The planner is a standard persistent cron job — no special service or engine code needed.
 
@@ -183,7 +182,6 @@ Plans are stored in the `plans` SQLite table (schema v12):
   - **Decline** — marks plan as declined
   - **Request Revision** — quote-style feedback input, sends to planner session
 - Previous feedback shown as blockquote
-- **Multi-Agent toggle** — when houseofagents is enabled and available, shows a "Multi-Agent" toggle with mode/agents selection. Sends `runtime=houseofagents` to the approve endpoint.
 
 ## API Endpoints
 
@@ -192,6 +190,6 @@ Plans are stored in the `plans` SQLite table (schema v12):
 | GET | `/api/plans` | List plans (query: `status`, `task_id`) |
 | GET | `/api/plans/:id` | Get plan detail |
 | PATCH | `/api/plans/:id` | Update status/feedback |
-| POST | `/api/plans/:id/approve` | Approve + spawn implementation (body: `{runtime?, hoa_mode?, hoa_agents?, hoa_pipeline_id?}`) |
+| POST | `/api/plans/:id/approve` | Approve + spawn implementation |
 | POST | `/api/plans/:id/revise` | Send revision feedback to planner |
 | GET | `/api/tasks/:id/plans` | Plans for a specific task |

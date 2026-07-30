@@ -205,8 +205,6 @@ class SetupChoices:
     # docker credential forwarding
     claude_oauth_token: str = ""  # OAuth token (from keychain/credentials.json/manual)
     github_token: str = ""  # GitHub PAT (from gh auth token/env)
-    # houseofagents
-    houseofagents_enabled: bool = False
     # worker-specific
     task_description: str = ""
     # external agents (Codex, Claude Code, ...)
@@ -491,7 +489,7 @@ class SetupWizard:
             return None
         total = 0 if self._inside_docker else 1  # deployment
         total += 4  # mode, api keys, workspace, password
-        total += 6 if self.choices.mode == "personal" else 1
+        total += 5 if self.choices.mode == "personal" else 1
         return total
 
     def _next_step(self, label: str) -> str:
@@ -574,7 +572,6 @@ class SetupWizard:
                 self._do("channels", self._step_channels)
                 self._do("sources", self._step_sources)
                 self._do("crons", self._step_crons)
-                self._do("houseofagents", self._step_houseofagents)
                 self._do("external_agents", self._step_external_agents)
             else:
                 self._do("worker_setup", self._step_worker_setup)
@@ -991,7 +988,7 @@ class SetupWizard:
         click.echo()
         click.secho(
             f"  → Model IDs will use the '{prefix}.' inference-profile prefix\n"
-            f"    (e.g. {prefix}.anthropic.claude-opus-4-8) based on region {region}.",
+            f"    (e.g. {prefix}.anthropic.claude-opus-5) based on region {region}.",
             fg="green",
         )
         click.echo()
@@ -1440,39 +1437,6 @@ class SetupWizard:
         )
         click.echo()
 
-    # --- Step: houseofagents (Optional) ---
-
-    def _step_houseofagents(self) -> None:
-        click.clear()
-        click.secho(self._next_step("Multi-Agent Runtime (Optional)"), fg="cyan", bold=True)
-        click.echo()
-        click.secho(
-            "houseofagents is a multi-agent orchestrator that can run\n"
-            "relay, swarm, and pipeline workflows using Claude, OpenAI,\n"
-            "and Gemini agents. When enabled, plan implementations can\n"
-            "use a team of agents instead of a single session.\n",
-            dim=True,
-        )
-        click.secho(
-            "This is optional — you can enable it later in config.yaml.\n"
-            "The binary (~50 MB) downloads on first use, not now.",
-            dim=True,
-        )
-        click.echo()
-
-        self.choices.houseofagents_enabled = click.confirm(
-            "Enable houseofagents multi-agent runtime?",
-            default=False,
-        )
-
-        if self.choices.houseofagents_enabled:
-            click.echo()
-            click.secho("  Binary downloads automatically on first use.", dim=True)
-            click.secho("  -> houseofagents enabled.", fg="green")
-        else:
-            click.secho("  -> Skipped.", dim=True)
-        click.echo()
-
     # --- Step: External Agents (Codex, Claude Code, ...) ---
 
     def _step_external_agents(self) -> None:
@@ -1888,7 +1852,6 @@ class SetupWizard:
         endpoint = data.setdefault("mcp_endpoint", {})
         endpoint["enabled"] = True
         endpoint.setdefault("path", "/mcp/v1")
-        endpoint.setdefault("include_hoa", False)
         path.write_text(yaml.safe_dump(data, sort_keys=False))
 
     def _build_web_ui(self) -> None:
@@ -1954,10 +1917,10 @@ class SetupWizard:
             "timezone": tz,
             "deployment": self.choices.deployment,
             "agent": {
-                "model": "claude-opus-4-8",
+                "model": "claude-opus-5",
                 "cron_model": "claude-sonnet-4-6",
                 "max_turns": 50,
-                "max_concurrent": 4,
+                "max_concurrent": 32,
                 "thinking": "max",
                 "effort": "max",
                 "context_1m": True,
@@ -2020,7 +1983,7 @@ class SetupWizard:
             # The prefix is geography-scoped (us./eu./apac.) and must match
             # the configured region or every call 400s.
             geo = bedrock_geo_prefix(self.choices.aws_region)
-            config["agent"]["model"] = f"{geo}.anthropic.claude-opus-4-8"
+            config["agent"]["model"] = f"{geo}.anthropic.claude-opus-5"
             config["agent"]["cron_model"] = f"{geo}.anthropic.claude-sonnet-4-6"
             config["agent"]["title_model"] = f"{geo}.anthropic.claude-haiku-4-5-20251001-v1:0"
             config["memory"]["recall_model"] = f"{geo}.anthropic.claude-sonnet-4-6"
@@ -2031,14 +1994,6 @@ class SetupWizard:
             config["proxy"] = {
                 "enabled": True,
                 "port": 8317,
-            }
-
-        if self.choices.houseofagents_enabled:
-            config["houseofagents"] = {
-                "enabled": True,
-                "default_mode": "relay",
-                "default_agents": ["Claude"],
-                "use_cli": True,
             }
 
         if self.choices.deployment == "docker":
@@ -2401,9 +2356,6 @@ def run_non_interactive(config_dir: Path) -> SetupChoices:
         choices.enabled_crons = ["inbox-processor", "task-planner"]
     elif choices.mode == "worker":
         choices.enabled_crons = ["skill-reviser", "skill-extractor", "task-planner"]
-
-    # houseofagents
-    choices.houseofagents_enabled = os.environ.get("NERVE_HOA_ENABLED", "") == "1"
 
     # External agents — comma-separated list ("codex,claude-code") and
     # optional conflict policy. Validated against AGENT_REGISTRY so an

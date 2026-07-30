@@ -14,7 +14,9 @@ from __future__ import annotations
 # Key: canonical model short-name substring → (input, output, cache_read,
 # cache_write_5m, cache_write_1h, web_search_per_req)
 MODEL_PRICING: dict[str, tuple[float, float, float, float, float, float]] = {
-    "fable-5":    (10,  50, 1.00, 12.50, 20.00, 0.01),  # Fable 5 (Mythos-class, ~2x Opus 4.8)
+    "fable-5":    (10,  50, 1.00, 12.50, 20.00, 0.01),  # Fable 5 (Mythos-class, ~2x Opus)
+    "opus-5":     (5,   25, 0.50,  6.25, 10.00, 0.01),  # Opus 5 standard (verified 2026-07-28)
+    "sonnet-5":   (3,   15, 0.30,  3.75,  6.00, 0.01),  # Sonnet 5 standard (verified 2026-07-28)
     "opus-4-8":   (5,   25, 0.50,  6.25, 10.00, 0.01),  # Opus 4.8 standard
     "opus-4-7":   (5,   25, 0.50,  6.25, 10.00, 0.01),  # Opus 4.7 standard
     "opus-4-6":   (5,   25, 0.50,  6.25, 10.00, 0.01),  # Opus 4.6 standard
@@ -131,6 +133,31 @@ class UsageStore:
                         "total_estimated_cost_usd": 0,
                         "total_web_searches": 0, "total_web_fetches": 0}
             return dict(row)
+
+    async def get_session_effective_cost(self, session_id: str) -> float:
+        """Best-available dollar spend for a session.
+
+        Per turn: billed ``cost_usd`` when present and positive, else the
+        API-equivalent ``estimated_cost_usd`` (Codex ChatGPT-auth turns
+        report ``cost_usd`` NULL/0 with ``cost_basis`` of
+        ``chatgpt_credit``/``api_equivalent_estimate`` — the real spend
+        lives in the estimate column). This is the budget-enforcement
+        meter for workflow runs: a plain ``SUM(cost_usd)`` reads $0 for
+        subscription-auth Codex runs.
+        """
+        async with self.db.execute(
+            """
+            SELECT COALESCE(SUM(
+                CASE WHEN cost_usd IS NOT NULL AND cost_usd > 0
+                     THEN cost_usd
+                     ELSE COALESCE(estimated_cost_usd, 0)
+                END), 0)
+            FROM session_usage WHERE session_id = ?
+            """,
+            (session_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return float(row[0] or 0.0)
 
     async def get_usage_by_period(self, days: int = 7) -> list[dict]:
         """Daily aggregated usage for the past N days."""

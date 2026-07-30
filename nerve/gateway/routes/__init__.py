@@ -28,12 +28,13 @@ from nerve.gateway.routes import (
     cron,
     sources,
     notifications,
-    houseofagents,
     files,
     external_agents,
     prompt_rewrite,
     models,
     codex,
+    workflow_runs,
+    review_loops,
 )
 
 __all__ = [
@@ -59,10 +60,11 @@ def register_all_routes() -> APIRouter:
     router.include_router(cron.router)
     router.include_router(sources.router)
     router.include_router(notifications.router)
-    router.include_router(houseofagents.router)
     router.include_router(files.router)
     router.include_router(external_agents.router)
     router.include_router(prompt_rewrite.router)
     router.include_router(models.router)
     router.include_router(codex.router)
+    router.include_router(workflow_runs.router)
+    router.include_router(review_loops.router)
     return router

@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 # Global references
 _engine: AgentEngine | None = None
 _cron_service = None  # CronService
+_workflow_run_service = None  # WorkflowRunService (nerve.workflows)
+_review_loop_service = None  # ReviewLoopService (nerve.workflows.review_loop)
 # StreamableHTTPSessionManager assigned during lifespan when
 # config.mcp_endpoint.enabled. The /mcp/v1 mount handler reads it; until
 # lifespan finishes building it, the mount returns 503.
@@ -236,6 +238,102 @@ async def lifespan(app: FastAPI):
                 notification_service.hide_session_label_for(f"cron:{job.id}")
     except Exception as e:
         logger.warning("Cron service failed to start: %s", e)
+
+    # Start the workflow-run service (budget-capped multi-agent jobs).
+    # After notification_service wiring so budget alerts can deliver, and
+    # after engine init so runs execute against live backends. A startup
+    # failure here must be LOUD, not a silent warning — runs are
+    # budget-enforced only while this service is alive.
+    global _workflow_run_service
+    try:
+        from nerve.workflows import init_workflow_run_service
+
+        _workflow_run_service = init_workflow_run_service(config, db, _engine)
+        if _workflow_run_service is not None:
+            await _workflow_run_service.start()
+            logger.info("Workflow run service started")
+    except Exception as e:
+        logger.error("Workflow run service failed to start: %s", e)
+        _workflow_run_service = None
+        try:
+            # Drop the module singleton too — otherwise REST/MCP/cron keep
+            # reaching a monitor-less service and "budgeted" runs start with
+            # no budget enforcement (fail-open).
+            from nerve.workflows import reset_workflow_run_service
+
+            reset_workflow_run_service()
+        except Exception:
+            pass
+        try:
+            await notification_service.send_notification(
+                session_id="system",
+                title="Workflow run service failed to start",
+                body=f"Budget-capped workflow runs are unavailable: {e}",
+                priority="high",
+            )
+        except Exception:
+            pass
+
+    # Review loops ride on workflow runs. STRICTLY after
+    # workflow_run_service.start(): the runs orphan-recovery pass must
+    # finish before the loop recovery pass reads leg statuses (and the
+    # completion listener must not observe recovery transitions).
+    global _review_loop_service
+    if _workflow_run_service is not None:
+        try:
+            from nerve.workflows import init_review_loop_service
+
+            _review_loop_service = init_review_loop_service(
+                config, db, _engine, _workflow_run_service,
+            )
+            if _review_loop_service is not None:
+                await _review_loop_service.start()
+                logger.info("Review loop service started")
+        except Exception as e:
+            logger.error("Review loop service failed to start: %s", e)
+            _review_loop_service = None
+            try:
+                # Drop the module singleton too — routes/MCP must see the
+                # feature as unavailable, not a half-started zombie whose
+                # worker/reconcile tasks never came up.
+                from nerve.workflows import reset_review_loop_service
+
+                reset_review_loop_service()
+            except Exception:
+                pass
+            try:
+                await notification_service.send_notification(
+                    session_id="system",
+                    title="Review loop service failed to start",
+                    body=f"Review loops are unavailable: {e}",
+                    priority="high",
+                )
+            except Exception:
+                pass
+
+    # One-shot cleanup of retired houseofagents artifacts. Gated on the
+    # NERVE-MANAGED binary existing (~/.nerve/bin/ is ours): a standalone
+    # houseofagents install the user runs outside Nerve keeps its
+    # ~/.config/houseofagents/config.toml untouched. When it was ours, the
+    # config.toml holds plaintext API keys Nerve wrote — park it out of the
+    # way; the binary is re-downloadable and just deleted. Best-effort —
+    # never blocks startup.
+    try:
+        hoa_binary = Path("~/.nerve/bin/houseofagents").expanduser()
+        if hoa_binary.exists():
+            hoa_config = Path("~/.config/houseofagents/config.toml").expanduser()
+            if hoa_config.exists() and not hoa_config.is_symlink():
+                retired_dir = Path("~/.nerve/houseofagents-retired").expanduser()
+                retired_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                hoa_config.rename(retired_dir / "config.toml.bak")
+                logger.info(
+                    "houseofagents retired: moved %s to %s",
+                    hoa_config, retired_dir / "config.toml.bak",
+                )
+            hoa_binary.unlink()
+            logger.info("houseofagents retired: deleted binary %s", hoa_binary)
+    except Exception as e:
+        logger.warning("houseofagents artifact cleanup failed: %s", e)
 
     # Periodic session cleanup. Default cadence is every 6 hours (unchanged);
     # it tightens to hourly only when the opt-in interactive idle auto-close
@@ -474,6 +572,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Failed to send startup notification: %s", e)
 
+    # Re-drive any sessions enrolled via `nerve restart --resume`. Runs as a
+    # background task so a (possibly long) resumed turn never blocks startup;
+    # the engine, notification service and channels are all wired by now.
+    asyncio.create_task(_engine.resume_enrolled_sessions())
+
     yield
 
     # Stop the loopback listener before the manager so no new requests
@@ -521,6 +624,18 @@ async def lifespan(app: FastAPI):
         await telegram_channel.stop()
     if cron_task:
         await cron_task.stop()
+    if _review_loop_service is not None:
+        try:
+            await _review_loop_service.stop()
+        except Exception as e:
+            logger.warning("Review loop service shutdown raised: %s", e)
+        _review_loop_service = None
+    if _workflow_run_service is not None:
+        try:
+            await _workflow_run_service.stop()
+        except Exception as e:
+            logger.warning("Workflow run service shutdown raised: %s", e)
+        _workflow_run_service = None
 
     db_retention_task.cancel()
     notify_maintenance_task.cancel()

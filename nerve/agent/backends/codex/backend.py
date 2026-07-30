@@ -97,31 +97,6 @@ _MISSING_THREAD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Ultracode workers are non-interactive and therefore cannot safely inherit
-# every mutating Nerve tool under an unconditional MCP approval. Keep the
-# child surface useful for context/research while making future tools fail
-# closed until explicitly reviewed.
-_ULTRACODE_CHILD_NERVE_TOOLS = (
-    "session_context",
-    "memory_recall",
-    "memory_expand_category",
-    "conversation_history",
-    "memory_records_by_date",
-    "task_search",
-    "task_list",
-    "task_read",
-    "task_status_list",
-    "plan_list",
-    "plan_read",
-    "skill_list",
-    "skill_get",
-    "skill_read_reference",
-    "sync_status",
-    "list_sources",
-    "read_source",
-)
-
-
 def _is_missing_thread_error(error: CodexRpcError) -> bool:
     """Return True only for a positively identified missing thread.
 
@@ -436,6 +411,20 @@ class CodexBackend:
                 f"{base}.startup_timeout_sec=30",
                 f"{base}.tool_timeout_sec={int(self.codex.tool_timeout_sec)}",
             ]
+            if spec.source not in ("web",):
+                # Non-interactive sessions (workflow-run legs, cron, hooks)
+                # cannot answer codex's per-tool MCP approvals — the hub
+                # auto-denies and every nerve tool call dies with "user
+                # rejected MCP tool call" (the same failure mode the
+                # Ultracode child config below already works around). The
+                # nerve server is Nerve's own gateway behind a session-scoped
+                # token, and its tool handlers enforce source gating
+                # server-side (e.g. workflow sessions can't start runs) —
+                # pre-approve it. Interactive (web) sessions keep the
+                # approval prompts.
+                overrides.append(
+                    f'{base}.default_tools_approval_mode="approve"'
+                )
         else:
             logger.warning(
                 "Codex session %s starts WITHOUT nerve tools: gateway port "
@@ -536,7 +525,10 @@ class CodexBackend:
         params: dict[str, Any] = {
             "cwd": spec.cwd,
             "model": spec.model or self.codex.model,
-            "sandbox": self.codex.sandbox,
+            # Per-session override (SessionSpec.extra, set from session
+            # metadata ``codex_sandbox``) beats the global default — used by
+            # review-loop verifier legs to enforce workspace-write.
+            "sandbox": str(spec.extra.get("sandbox") or "") or self.codex.sandbox,
             "approvalPolicy": self.codex.approval_policy,
             "developerInstructions": spec.system_prompt + _BACKEND_NOTES,
         }
@@ -573,24 +565,28 @@ class CodexClient(AgentClient):
         config_overrides = backend.build_config_overrides(spec)
         env = backend.build_env(spec)
         if backend.codex.ultracode.enabled:
-            # Child workers need Nerve's MCP bridge, but not the parent's
-            # external MCP servers.  Besides reducing startup overhead, this
-            # prevents third-party credentials from being copied into
-            # NERVE_CODEX_CHILD_CONFIG and then exposed in worker argv.
+            # Child workers inherit the parent session's FULL MCP surface —
+            # the Nerve bridge and external servers alike — with the same
+            # permissions as the session itself (no worker-side tool
+            # allowlist). Secrets still never touch worker argv: external
+            # server configs reference synthetic environment names that the
+            # stdio launcher resolves at server spawn.
             child_overrides = [
                 value for value in config_overrides
-                if value.startswith("mcp_servers.nerve.")
+                if value.startswith("mcp_servers.")
             ]
-            # Ultracode is non-interactive (approval_policy=never). Explicitly
-            # approve the trusted, session-scoped Nerve server or Codex marks
-            # every child MCP call as "user cancelled".
-            child_overrides.append(
-                'mcp_servers.nerve.default_tools_approval_mode="approve"'
-            )
-            child_overrides.append(
-                "mcp_servers.nerve.enabled_tools="
-                + json.dumps(_ULTRACODE_CHILD_NERVE_TOOLS)
-            )
+            # Ultracode is non-interactive (approval_policy=never), so every
+            # inherited server needs an explicit approval mode or Codex marks
+            # its child MCP calls as "user cancelled". Keep any mode the
+            # parent already carries (parity); default the rest to approve.
+            names = {
+                value.removeprefix("mcp_servers.").split(".", 1)[0]
+                for value in child_overrides
+            }
+            for name in sorted(names):
+                prefix = f"mcp_servers.{name}.default_tools_approval_mode="
+                if not any(v.startswith(prefix) for v in child_overrides):
+                    child_overrides.append(prefix + '"approve"')
             env["NERVE_CODEX_CHILD_CONFIG"] = json.dumps(child_overrides)
             port = backend._deps.gateway_port()
             if port:

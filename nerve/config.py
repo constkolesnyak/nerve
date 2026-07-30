@@ -14,11 +14,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nerve.houseofagents.config import HouseOfAgentsConfig
-
 import yaml
 
 logger = logging.getLogger(__name__)
+
+# Runtime queue of session ids to auto-resume after ``nerve restart --resume``.
+# The CLI appends ids here (synchronously, before triggering the restart) and
+# the fresh daemon drains it on startup. Kept next to the other ~/.nerve runtime
+# state (pid/log/db) and independent of ``-c`` so writer and reader always agree.
+RESUME_QUEUE_FILE = Path("~/.nerve/resume-after-restart").expanduser()
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -130,6 +134,17 @@ class PromptRewriteConfig:
         )
 
 
+# Built-in fallback for the composer's Claude model picker when
+# ``agent.models`` is unset — the current-generation models Nerve itself
+# defaults to elsewhere in this file. Bare Anthropic API IDs: they do not
+# apply on Bedrock, where model IDs are region-prefixed.
+DEFAULT_CLAUDE_MODELS: tuple[str, ...] = (
+    "claude-opus-5",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
+)
+
+
 @dataclass
 class AgentConfig:
     # Agent backend for NEW sessions: "claude" (Claude Agent SDK) or
@@ -141,11 +156,27 @@ class AgentConfig:
     # Wakeup turns fire on existing sessions and inherit their stored
     # backend — this only affects freshly minted cron/hook sessions.
     cron_backend: str = ""
-    model: str = "claude-opus-4-8"
+    model: str = "claude-opus-5"
     cron_model: str = "claude-sonnet-4-6"
     title_model: str = "claude-haiku-4-5-20251001"  # Session title generation
+    # Model-alias remapping for the Claude CLI subprocess: alias → model ID,
+    # emitted as ANTHROPIC_DEFAULT_<ALIAS>_MODEL env vars so short aliases
+    # ("opus" in Agent/Workflow tool calls, skill frontmatter, cron model
+    # overrides) resolve to the mapped model. Supported aliases: opus,
+    # sonnet, haiku, fable. Nerve defaults opus → claude-opus-5 on
+    # non-Bedrock providers; entries here merge over that default, and an
+    # empty value ("") unsets it (falls back to the CLI's built-in mapping).
+    model_aliases: dict[str, str] = field(default_factory=dict)
+    # Claude models selectable in the web composer's model picker
+    # (GET /api/models). The configured `model` above is always offered
+    # first; entries here extend the list (order-preserving, deduped).
+    # Empty → a built-in current-generation list (DEFAULT_CLAUDE_MODELS)
+    # on the direct Anthropic API; on Bedrock only the models named in
+    # config are offered (Bedrock IDs are region-prefixed, so the bare
+    # built-ins would not resolve there).
+    models: list[str] = field(default_factory=list)
     max_turns: int = 100
-    max_concurrent: int = 4
+    max_concurrent: int = 32
     thinking: str = "max"       # max, high, medium, low, disabled, adaptive, or number (budget_tokens)
     effort: str = "max"         # max, xhigh, high, medium, low
     # Effort for cron- and hook-sourced turns (sensing / triage work). These
@@ -200,11 +231,20 @@ class AgentConfig:
         return cls(
             backend=str(d.get("backend", "claude")).strip().lower(),
             cron_backend=str(d.get("cron_backend") or "").strip().lower(),
-            model=d.get("model", "claude-opus-4-8"),
+            model=d.get("model", "claude-opus-5"),
             cron_model=d.get("cron_model", "claude-sonnet-4-6"),
             title_model=d.get("title_model", "claude-haiku-4-5-20251001"),
+            model_aliases={
+                str(k): str(v or "")
+                for k, v in (d.get("model_aliases") or {}).items()
+            },
+            models=[
+                s for s in (
+                    str(m or "").strip() for m in (d.get("models") or [])
+                ) if s
+            ],
             max_turns=d.get("max_turns", 100),
-            max_concurrent=d.get("max_concurrent", 4),
+            max_concurrent=d.get("max_concurrent", 32),
             thinking=str(d.get("thinking", "max")),
             effort=str(d.get("effort", "max")),
             cron_effort=str(d.get("cron_effort", "medium")),
@@ -835,6 +875,162 @@ class BackupConfig:
 
 
 @dataclass
+class ReviewLoopLegConfig:
+    """Engine/model/effort defaults for one review-loop role."""
+
+    engine: str = "claude-workflow"
+    model: str = ""    # "" = backend default (agent.model / codex.model)
+    effort: str = ""   # "" = source default
+
+    @classmethod
+    def from_dict(cls, d: dict, default_engine: str) -> ReviewLoopLegConfig:
+        engine = str(d.get("engine", default_engine))
+        if engine not in ("claude-workflow", "codex-ultracode"):
+            raise ValueError(
+                "review_loop leg engine must be 'claude-workflow' or "
+                f"'codex-ultracode', got {engine!r}"
+            )
+        return cls(
+            engine=engine,
+            model=str(d.get("model", "")),
+            effort=str(d.get("effort", "")),
+        )
+
+
+@dataclass
+class ReviewLoopConfig:
+    """Deterministic implement→verify loops composed of workflow runs.
+
+    An implementer leg works toward a Goal prompt; a verifier leg judges
+    the workspace against Verifier criteria and returns a structured
+    verdict; the server-side controller iterates until pass or caps
+    (iterations, dollars, no-progress). See docs/review-loops.md.
+    """
+
+    enabled: bool = True
+    implementer: ReviewLoopLegConfig = field(
+        default_factory=lambda: ReviewLoopLegConfig(engine="claude-workflow"),
+    )
+    # Cross-vendor verification by default: a different model family has
+    # decorrelated blind spots and no self-preference toward the
+    # implementer's work. Falls back to claude/claude when codex is not
+    # configured (checked at loop creation, not here).
+    verifier: ReviewLoopLegConfig = field(
+        default_factory=lambda: ReviewLoopLegConfig(engine="codex-ultracode"),
+    )
+    max_iterations: int = 3            # per-loop default; hard code ceiling 8
+    default_budget_usd: float = 10.0
+    min_leg_budget_usd: float = 0.5    # never start a leg with less than this
+    verifier_reserve_fraction: float = 0.15  # held back so the last attempt is always verified
+    criteria_adoption: str = "no"      # no | ask | auto (verifier-proposed criteria)
+    max_new_criteria_per_iteration: int = 3
+    max_discovered_criteria: int = 12
+    discovery_grace_rounds: int = 2
+    auto_reissue_implementer: bool = False  # restart recovery: re-issue interrupted implementer legs
+    escalation_reproposals: int = 2    # re-file expired/dismissed decision cards this many times
+    verifier_sandbox: str = "workspace-write"  # codex verifier legs (isolation vs test-writes)
+    reconcile_interval_seconds: int = 600
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ReviewLoopConfig:
+        adoption = d.get("criteria_adoption", "no")
+        if adoption is False:
+            adoption = "no"  # YAML parses an unquoted `no` as boolean False
+        adoption = str(adoption).lower()
+        if adoption not in ("no", "ask", "auto"):
+            raise ValueError(
+                "review_loop.criteria_adoption must be 'no', 'ask' or "
+                f"'auto', got {adoption!r}"
+            )
+        return cls(
+            enabled=bool(d.get("enabled", True)),
+            implementer=ReviewLoopLegConfig.from_dict(
+                d.get("implementer", {}) or {}, "claude-workflow",
+            ),
+            verifier=ReviewLoopLegConfig.from_dict(
+                d.get("verifier", {}) or {}, "codex-ultracode",
+            ),
+            max_iterations=int(d.get("max_iterations", 3)),
+            default_budget_usd=float(d.get("default_budget_usd", 10.0)),
+            min_leg_budget_usd=float(d.get("min_leg_budget_usd", 0.5)),
+            verifier_reserve_fraction=float(d.get("verifier_reserve_fraction", 0.15)),
+            criteria_adoption=adoption,
+            max_new_criteria_per_iteration=int(d.get("max_new_criteria_per_iteration", 3)),
+            max_discovered_criteria=int(d.get("max_discovered_criteria", 12)),
+            discovery_grace_rounds=int(d.get("discovery_grace_rounds", 2)),
+            auto_reissue_implementer=bool(d.get("auto_reissue_implementer", False)),
+            escalation_reproposals=int(d.get("escalation_reproposals", 2)),
+            verifier_sandbox=str(d.get("verifier_sandbox", "workspace-write")),
+            reconcile_interval_seconds=int(d.get("reconcile_interval_seconds", 600)),
+        )
+
+
+@dataclass
+class WorkflowRunsConfig:
+    """Budget-capped multi-agent workflow runs.
+
+    A workflow run wraps a dedicated agent session (Claude harness
+    Workflow tool or Codex Ultracode) in a dollar budget enforced from
+    Nerve's own usage metering, with run-scoped kill and a durable
+    journal directory under ``runs_dir``.
+    """
+
+    enabled: bool = True
+    # Root for per-run journal dirs: <runs_dir>/<run-id>/{run.json,events.ndjson,result.md}
+    runs_dir: Path = field(default_factory=lambda: Path("~/.nerve/workflow-runs"))
+    # Budget monitor cadence. Spend is re-metered (recorded turn costs +
+    # live in-flight estimate) every interval.
+    poll_interval_seconds: int = 60
+    # Fraction of budget_usd at which a one-time warning notification fires.
+    warn_fraction: float = 0.8
+    # After a graceful stop request at 100% budget, how long to wait before
+    # force-discarding the session's client (which kills its subprocess).
+    kill_grace_seconds: int = 30
+    # Runs dispatched concurrently; excess queues in status 'pending'.
+    # Each running workflow occupies one agent.max_concurrent slot for the
+    # duration of its turn — keep this well below that limit.
+    max_concurrent_runs: int = 2
+    # Whether workflow_run_start may launch runs without a budget. Budget
+    # enforcement is the point of this surface, so default is False.
+    allow_unbudgeted: bool = False
+    # Review loops (implement→verify cycles) — nested feature config.
+    review_loop: ReviewLoopConfig = field(default_factory=ReviewLoopConfig)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> WorkflowRunsConfig:
+        return cls(
+            enabled=bool(d.get("enabled", True)),
+            runs_dir=_expand_path(d.get("runs_dir", "~/.nerve/workflow-runs"))
+            or Path("~/.nerve/workflow-runs"),
+            poll_interval_seconds=int(d.get("poll_interval_seconds", 60)),
+            warn_fraction=float(d.get("warn_fraction", 0.8)),
+            kill_grace_seconds=int(d.get("kill_grace_seconds", 30)),
+            max_concurrent_runs=int(d.get("max_concurrent_runs", 2)),
+            allow_unbudgeted=bool(d.get("allow_unbudgeted", False)),
+            review_loop=ReviewLoopConfig.from_dict(d.get("review_loop", {}) or {}),
+        )
+
+
+@dataclass
+class HouseOfAgentsConfig:
+    """Deprecated — houseofagents was retired in favor of workflow runs.
+
+    Kept only so existing ``config.yaml`` files with a ``houseofagents:``
+    block keep parsing, and so ``enabled`` can gate visibility of the
+    ``hoa_*`` deprecation stub tools (``nerve/agent/tools/handlers/hoa.py``).
+    Every other legacy key (default_mode, default_agents, use_cli, ...) is
+    ignored. Use ``workflows:`` / the ``workflow_run_*`` tools instead —
+    see ``docs/workflow-runs.md``.
+    """
+
+    enabled: bool = False
+
+    @classmethod
+    def from_dict(cls, d: dict) -> HouseOfAgentsConfig:
+        return cls(enabled=bool(d.get("enabled", False)))
+
+
+@dataclass
 class SessionsConfig:
     archive_after_days: int = 30
     interactive_archive_after_hours: int = 0  # Interactive (web/telegram/…) sessions auto-close after this many idle hours (0 = disabled; opt in via config). Starred sessions are exempt and never auto-close.
@@ -1044,7 +1240,7 @@ class McpEndpointConfig:
 
     enabled: bool = False
     path: str = "/mcp/v1"
-    include_hoa: bool = False   # Expose HouseOfAgents tools to external clients
+    include_hoa: bool = False   # Expose the deprecated hoa_* stub tools to external clients
 
     @classmethod
     def from_dict(cls, d: dict) -> McpEndpointConfig:
@@ -1563,6 +1759,7 @@ class NerveConfig:
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
+    workflows: WorkflowRunsConfig = field(default_factory=WorkflowRunsConfig)
     houseofagents: HouseOfAgentsConfig = field(default_factory=HouseOfAgentsConfig)
     langfuse: LangfuseConfig = field(default_factory=LangfuseConfig)
     xmemory: XmemoryConfig = field(default_factory=XmemoryConfig)
@@ -1606,6 +1803,26 @@ class NerveConfig:
         the Anthropic↔OpenAI translation layer Ollama is reached through).
         """
         return self.ollama.enabled and self.proxy.enabled
+
+    @property
+    def claude_models(self) -> list[str]:
+        """Selectable Claude chat models for the composer's model picker.
+
+        The configured default (``agent.model``) always leads; ``agent.models``
+        entries follow in config order (deduped). When ``agent.models`` is
+        unset, the built-in :data:`DEFAULT_CLAUDE_MODELS` list applies on the
+        direct Anthropic API. Bedrock model IDs are region-prefixed, so the
+        bare built-ins are skipped there — Bedrock offers only the models
+        named in config.
+        """
+        extras = self.agent.models or (
+            [] if self.provider.is_bedrock else list(DEFAULT_CLAUDE_MODELS)
+        )
+        ordered: list[str] = []
+        for m in (self.agent.model, *extras):
+            if m and m not in ordered:
+                ordered.append(m)
+        return ordered
 
     def create_anthropic_client(self, timeout: float = 60.0) -> Any:
         """Create an Anthropic client based on the configured provider.
@@ -1743,6 +1960,7 @@ class NerveConfig:
             proxy=ProxyConfig.from_dict(d.get("proxy", {})),
             ollama=OllamaConfig.from_dict(d.get("ollama", {})),
             codex=CodexConfig.from_dict(d.get("codex", {})),
+            workflows=WorkflowRunsConfig.from_dict(d.get("workflows", {})),
             houseofagents=HouseOfAgentsConfig.from_dict(d.get("houseofagents", {})),
             langfuse=LangfuseConfig.from_dict(d.get("langfuse", {})),
             xmemory=XmemoryConfig.from_dict(d.get("xmemory", {})),
@@ -1953,8 +2171,6 @@ def validate_config_keys(merged: dict) -> list[str]:
             return ftype
         if isinstance(ftype, str):
             candidate = globals().get(ftype)
-            if candidate is None and ftype == "HouseOfAgentsConfig":
-                candidate = HouseOfAgentsConfig
             if isinstance(candidate, type) and dataclasses.is_dataclass(candidate):
                 return candidate
         return None

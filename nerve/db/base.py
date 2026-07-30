@@ -24,6 +24,7 @@ from nerve.db.messages import MessageStore
 from nerve.db.migrations.runner import discover_migrations, run_migrations
 from nerve.db.notifications import NotificationStore
 from nerve.db.plans import PlanStore
+from nerve.db.review_loops import ReviewLoopStore
 from nerve.db.sessions import SessionStore
 from nerve.db.skills import SkillStore
 from nerve.db.sources import SourceStore
@@ -31,6 +32,7 @@ from nerve.db.task_statuses import TaskStatusStore
 from nerve.db.tasks import TaskStore
 from nerve.db.usage import UsageStore
 from nerve.db.wakeups import WakeupStore
+from nerve.db.workflow_runs import WorkflowRunStore
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,8 @@ class Database(
     UsageStore,
     FileStore,
     WakeupStore,
+    WorkflowRunStore,
+    ReviewLoopStore,
     MaintenanceStore,
 ):
     """Async SQLite database wrapper.
