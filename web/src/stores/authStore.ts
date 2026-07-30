@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api, setToken, clearToken, getToken } from '../api/client';
+import { clearAllDrafts } from './helpers/draftStorage';
 
 interface AuthState {
   authenticated: boolean;
@@ -30,6 +31,8 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   logout: () => {
     clearToken();
+    // Purge unsent drafts so nothing leaks to the next user on a shared browser.
+    clearAllDrafts();
     set({ authenticated: false });
   },
 
@@ -42,7 +45,9 @@ export const useAuthStore = create<AuthState>((set) => ({
           // No password configured — auto-login
           const { token } = await api.login('');
           setToken(token);
-          set({ authenticated: true });
+          // checking must be cleared here too — App renders null while it
+          // is true, so leaving it set blanks the app after auto-login.
+          set({ authenticated: true, checking: false });
           return;
         }
       } catch {

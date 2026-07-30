@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 # Cleanup defaults
 DEFAULT_ARCHIVE_AFTER_DAYS = 30
 DEFAULT_MAX_SESSIONS = 500
+# Sources treated as interactive for the opt-in short idle auto-close. Cron and
+# source-runner sessions are excluded so their context continuity is preserved.
+INTERACTIVE_SOURCES = ["web", "telegram", "discord", "slack", "whatsapp"]
 
 
 class SessionStatus(StrEnum):
@@ -172,11 +175,21 @@ class SessionManager:
         sdk_session_id: str | None = None,
         connected_at: str | None = None,
     ) -> None:
-        """Mark session as active with an SDK client."""
-        now = connected_at or datetime.now(timezone.utc).isoformat()
+        """Mark session as active with an SDK client.
+
+        ``connected_at`` is the (stable) time the SDK client connected; callers
+        pass the original value when resuming an existing client so it is
+        preserved across turns. ``last_activity_at`` must instead always advance
+        to the real current time, because it drives channel stickiness
+        (see :meth:`_is_within_sticky_period`). Pinning it to ``connected_at``
+        froze it at session start, so any session older than
+        ``sticky_period_minutes`` was wrongly rotated onto a fresh session on
+        the next inbound message even when a turn had just completed.
+        """
+        now = datetime.now(timezone.utc).isoformat()
         fields: dict[str, Any] = {
             "status": SessionStatus.ACTIVE.value,
-            "connected_at": now,
+            "connected_at": connected_at or now,
             "last_activity_at": now,
         }
         if sdk_session_id is not None:
@@ -305,6 +318,16 @@ class SessionManager:
         if not session:
             raise ValueError(f"Session not found: {session_id}")
         await self.db.set_channel_session(channel_key, session_id)
+        # An explicit switch is a deliberate choice: the next inbound message must
+        # route to this session regardless of how long it has been idle. Mark it
+        # freshly active so get_active_session's sticky-period check honours the
+        # switch instead of minting a new session. Only last_activity_at moves —
+        # updated_at means "last message activity", so merely opening a chat
+        # never reorders the session list.
+        await self.db.update_session_fields(
+            session_id,
+            {"last_activity_at": datetime.now(timezone.utc).isoformat()},
+        )
         logger.info("Channel %s -> session %s", channel_key, session_id)
 
     async def clear_channel_session(self, channel_key: str) -> None:
@@ -582,10 +605,45 @@ class SessionManager:
     async def list_sessions(
         self, limit: int = 50, include_archived: bool = False,
     ) -> list[dict]:
-        """List sessions, most recently updated first."""
+        """List sessions, most recently updated first.
+
+        Starred sessions are always included; ``limit`` only bounds the
+        non-starred ones.
+        """
         return await self.db.list_sessions(
             limit=limit, include_archived=include_archived,
         )
+
+    async def set_starred(self, session_id: str, starred: bool) -> bool:
+        """Star or unstar a session.
+
+        Starred sessions are exempt from every auto-archival path (the idle
+        cutoff, the age backstop, and the overflow eviction), so they stay
+        resumable until explicitly unstarred or deleted. Returns the new
+        starred state; raises ``ValueError`` if the session does not exist.
+        """
+        session = await self.db.get_session(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+        await self.db.update_session_fields(
+            session_id, {"starred": 1 if starred else 0},
+        )
+        return starred
+
+    async def toggle_starred(self, session_id: str) -> bool:
+        """Flip a session's starred flag.
+
+        Returns the new starred state; raises ``ValueError`` if the session
+        does not exist.
+        """
+        session = await self.db.get_session(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+        new_starred = not session.get("starred")
+        await self.db.update_session_fields(
+            session_id, {"starred": 1 if new_starred else 0},
+        )
+        return new_starred
 
     # ------------------------------------------------------------------ #
     #  Archive & cleanup                                                   #
@@ -620,12 +678,45 @@ class SessionManager:
         self,
         archive_after_days: int = DEFAULT_ARCHIVE_AFTER_DAYS,
         max_sessions: int = DEFAULT_MAX_SESSIONS,
+        interactive_archive_after_hours: int = 0,
     ) -> dict:
         """Auto-archive stale sessions and enforce limits.
 
-        Returns dict with cleanup statistics.
+        When ``interactive_archive_after_hours`` > 0 (opt-in; 0 disables and leaves the
+        default behavior unchanged), interactive sessions (web/telegram/…)
+        idle longer than that are archived and memorized promptly — including
+        ones parked on an unanswered ``ask_user`` question, whose pending
+        notification is expired so it doesn't dangle on a closed session.
+        Cron/persistent sessions are excluded from the short cutoff and only
+        hit the ``archive_after_days`` backstop. Starred sessions are exempt
+        from every auto-archival path (short cutoff, backstop, and the
+        max-session overflow eviction) and are off-budget for the
+        ``max_sessions`` cap — they are neither counted toward it nor evicted,
+        so the cap governs only cap-eligible (non-starred) sessions. A starred
+        session is kept until it is explicitly unstarred or deleted. Returns
+        cleanup statistics.
         """
         now = datetime.now(timezone.utc)
+
+        # Opt-in short idle cutoff for interactive sessions. Skipped entirely
+        # when interactive_archive_after_hours == 0, so default behavior is unchanged.
+        archived_interactive = 0
+        if interactive_archive_after_hours and interactive_archive_after_hours > 0:
+            icutoff = (now - timedelta(hours=interactive_archive_after_hours)).isoformat()
+            interactive = await self.db.get_stale_interactive_sessions(
+                icutoff, INTERACTIVE_SOURCES,
+            )
+            for s in interactive:
+                try:
+                    await self.db.expire_pending_questions_for_session(s["id"])
+                except Exception as e:
+                    logger.warning(
+                        "Expire pending questions failed for %s: %s", s["id"], e,
+                    )
+                await self.archive_session(s["id"])
+            archived_interactive = len(interactive)
+
+        # Long backstop cutoff for everything (incl. non-interactive).
         cutoff = (now - timedelta(days=archive_after_days)).isoformat()
 
         # Archive idle/stopped sessions older than cutoff
@@ -633,8 +724,10 @@ class SessionManager:
         for s in stale:
             await self.archive_session(s["id"])
 
-        # Enforce max session count (archive oldest beyond limit)
-        count = await self.db.count_active_sessions()
+        # Enforce max session count (archive oldest beyond limit). Starred
+        # sessions are off-budget: excluded from the count and never evicted,
+        # so the cap governs only cap-eligible (non-starred) sessions.
+        count = await self.db.count_active_sessions(exclude_starred=True)
         overflow = 0
         if count > max_sessions:
             excess = await self.db.get_oldest_sessions(
@@ -645,10 +738,11 @@ class SessionManager:
             overflow = len(excess)
 
         stats = {
+            "archived_interactive": archived_interactive,
             "archived_stale": len(stale),
             "archived_overflow": overflow,
         }
-        if stale or overflow:
+        if archived_interactive or stale or overflow:
             logger.info("Session cleanup: %s", stats)
         return stats
 

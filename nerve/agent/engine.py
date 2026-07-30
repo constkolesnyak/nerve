@@ -1144,6 +1144,7 @@ class AgentEngine:
         self, session_id: str, source: str, model: str | None,
         fork_from: str | None = None,
         fork_last_turn_id: str | None = None,
+        effort_override: str | None = None,
     ) -> AgentClient:
         """Get an existing persistent client or create a new one.
 
@@ -1356,7 +1357,7 @@ class AgentEngine:
                 session_id=session_id,
                 source=source,
                 model=requested_model,
-                effort=self._base_effort_for_source(
+                effort=effort_override or self._base_effort_for_source(
                     source, self.config.agent.effort,
                     self.config.agent.cron_effort,
                 ),
@@ -2294,6 +2295,7 @@ class AgentEngine:
         source: str = "web",
         channel: str | None = None,
         model: str | None = None,
+        effort_override: str | None = None,
         internal: bool = False,
         images: list[dict[str, Any]] | None = None,
         image_refs: list[dict[str, Any]] | None = None,
@@ -2339,6 +2341,7 @@ class AgentEngine:
                 try:
                     return await self._run_inner(
                         session_id, user_message, source, channel, model,
+                        effort_override=effort_override,
                         internal=internal, images=images,
                         image_refs=image_refs,
                     )
@@ -2382,6 +2385,7 @@ class AgentEngine:
         source: str,
         channel: str | None,
         model: str | None,
+        effort_override: str | None = None,
         internal: bool = False,
         images: list[dict[str, Any]] | None = None,
         image_refs: list[dict[str, Any]] | None = None,
@@ -2462,6 +2466,7 @@ class AgentEngine:
             client = await self._get_or_create_client(
                 session_id, source, model, fork_from=fork_from,
                 fork_last_turn_id=fork_last_turn_id,
+                effort_override=effort_override,
             )
 
             # Check for deferred /stop that arrived while we were setting up
@@ -2596,6 +2601,7 @@ class AgentEngine:
                         await self._safe_disconnect(client)
                         client = await self._get_or_create_client(
                             session_id, source, model,
+                            effort_override=effort_override,
                         )
                         continue  # retry the query
 
@@ -2632,6 +2638,7 @@ class AgentEngine:
                         await self._safe_disconnect(client)
                         client = await self._get_or_create_client(
                             session_id, source, model,
+                            effort_override=effort_override,
                         )
                         continue  # retry query + response
                     break  # success — exit retry loop
@@ -3305,6 +3312,7 @@ class AgentEngine:
         model: str | None = None,
         run_id: str | None = None,
         cache_ttl: str = "",
+        effort: str | None = None,
     ) -> str:
         """Run an agent turn for a cron job in an isolated session.
 
@@ -3325,6 +3333,7 @@ class AgentEngine:
                 user_message=prompt,
                 source="cron",
                 model=model,  # backend default_model(source) fills cron defaults
+                effort_override=effort,
             )
             await self._settle_cursor_buffer(session_id, response)
             return response
@@ -3343,6 +3352,7 @@ class AgentEngine:
         model: str | None = None,
         session_id: str | None = None,
         cache_ttl: str = "",
+        effort: str | None = None,
     ) -> str:
         """Run a persistent cron job that maintains context across runs.
 
@@ -3370,6 +3380,7 @@ class AgentEngine:
                 user_message=prompt,
                 source="cron",
                 model=model,  # backend default_model(source) fills cron defaults
+                effort_override=effort,
             )
             await self._settle_cursor_buffer(session_id, response)
             return response

@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -50,6 +51,24 @@ class TestLifecycleTransitions:
         assert session["status"] == "active"
         assert session["sdk_session_id"] == "sdk-1"
         assert session["connected_at"] == "2024-01-01T00:00:00"
+
+    async def test_mark_active_advances_last_activity_despite_old_connected_at(
+        self, sm: SessionManager, db: Database,
+    ):
+        """Resuming an SDK client passes the ORIGINAL connected_at; last_activity_at
+        must still advance to now, since it drives channel stickiness. Regression:
+        last_activity_at was pinned to connected_at, freezing it at session start."""
+        from datetime import datetime, timezone
+        await sm.get_or_create("trans-la")
+        old = "2020-01-01T00:00:00+00:00"
+        await sm.mark_active("trans-la", sdk_session_id="sdk-la", connected_at=old)
+        session = await db.get_session("trans-la")
+        # connected_at is preserved (the stable original connect time)...
+        assert session["connected_at"] == old
+        # ...but last_activity_at reflects real current activity, not the old connect.
+        assert session["last_activity_at"] != old
+        last = datetime.fromisoformat(session["last_activity_at"])
+        assert (datetime.now(timezone.utc) - last).total_seconds() < 60
 
     async def test_mark_idle_preserves_sdk_id(self, sm: SessionManager, db: Database):
         await sm.get_or_create("trans-2")
@@ -177,6 +196,26 @@ class TestChannelMapping:
         sid2 = await sm.get_active_session("telegram:444", source="telegram")
         assert sid1 != sid2
 
+    async def test_resumed_long_lived_session_stays_sticky_after_turn(
+        self, sm: SessionManager, db: Database,
+    ):
+        """Regression: a long-lived session that just had a turn must not be rotated.
+
+        On resume the engine calls mark_active() with the session's ORIGINAL
+        connected_at. That used to pin last_activity_at to session start, so once
+        the session was older than sticky_period_minutes, the next inbound message
+        forked a fresh session even though a turn had just completed. last_activity_at
+        must track the turn, so the same session is reused.
+        """
+        sid1 = await sm.get_active_session("telegram:555", source="telegram")
+        # A turn resumes hours after the session first connected (original
+        # connected_at is far in the past), then the turn finishes and goes idle.
+        old_connect = "2020-01-01T00:00:00+00:00"
+        await sm.mark_active(sid1, sdk_session_id="sdk-r", connected_at=old_connect)
+        await sm.mark_idle(sid1)
+        sid2 = await sm.get_active_session("telegram:555", source="telegram")
+        assert sid1 == sid2
+
     async def test_set_and_get_active_session(self, sm: SessionManager, db: Database):
         await sm.get_or_create("ch-1")
         await sm.set_active_session("telegram:123", "ch-1")
@@ -190,6 +229,31 @@ class TestChannelMapping:
     async def test_set_active_session_not_found(self, sm: SessionManager):
         with pytest.raises(ValueError, match="not found"):
             await sm.set_active_session("telegram:123", "nonexistent")
+
+    async def test_explicit_switch_survives_sticky_period(
+        self, sm: SessionManager, db: Database,
+    ):
+        """An explicit switch routes the next message to the chosen session even
+        when it was idle far beyond the sticky period.
+
+        Channels without a per-message session id (e.g. Telegram) resolve the
+        target via get_active_session, whose sticky-period check would otherwise
+        reject a long-idle session and mint a fresh one — silently discarding the
+        user's switch. set_active_session marks the chosen session freshly active
+        so the choice is honoured.
+        """
+        await sm.get_or_create("old-sess", source="telegram")
+        await db.update_session_fields(
+            "old-sess", {"last_activity_at": "2020-01-01T00:00:00+00:00"},
+        )
+        await db.db.execute(
+            "UPDATE sessions SET updated_at = '2020-01-01T00:00:00' WHERE id = ?",
+            ("old-sess",),
+        )
+        await db.db.commit()
+        await sm.set_active_session("telegram:777", "old-sess")   # explicit switch
+        sid = await sm.get_active_session("telegram:777", source="telegram")
+        assert sid == "old-sess"    # honoured, not rotated to a fresh session
 
 
 @pytest.mark.asyncio
@@ -413,6 +477,133 @@ class TestArchiveAndCleanup:
         await sm.run_cleanup(archive_after_days=30)
         session = await db.get_session("cleanup-any")
         assert session["status"] == "archived"
+
+    async def _set_idle_hours_ago(self, db: Database, sid: str, hours: int):
+        ts = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        await db.update_session_fields(sid, {"status": "idle"})
+        await db.db.execute(
+            "UPDATE sessions SET updated_at = ? WHERE id = ?", (ts, sid),
+        )
+        await db.db.commit()
+
+    async def test_cleanup_hours_disabled_leaves_interactive_untouched(
+        self, sm: SessionManager, db: Database,
+    ):
+        """Default (interactive_archive_after_hours=0) must NOT close idle interactive sessions."""
+        await sm.get_or_create("idle-web", source="web")
+        await self._set_idle_hours_ago(db, "idle-web", hours=5)
+
+        stats = await sm.run_cleanup(archive_after_days=30, interactive_archive_after_hours=0)
+
+        assert stats["archived_interactive"] == 0
+        assert (await db.get_session("idle-web"))["status"] == "idle"
+
+    async def test_cleanup_hours_enabled_archives_idle_interactive(
+        self, sm: SessionManager, db: Database,
+    ):
+        await sm.get_or_create("idle-web2", source="web")
+        await self._set_idle_hours_ago(db, "idle-web2", hours=5)
+
+        stats = await sm.run_cleanup(archive_after_days=30, interactive_archive_after_hours=1)
+
+        assert stats["archived_interactive"] >= 1
+        assert (await db.get_session("idle-web2"))["status"] == "archived"
+
+    async def test_cleanup_hours_excludes_cron_sessions(
+        self, sm: SessionManager, db: Database,
+    ):
+        """Cron sessions are never subject to the short interactive cutoff."""
+        await sm.get_or_create("idle-cron", source="cron")
+        await self._set_idle_hours_ago(db, "idle-cron", hours=5)
+
+        await sm.run_cleanup(archive_after_days=30, interactive_archive_after_hours=1)
+
+        assert (await db.get_session("idle-cron"))["status"] == "idle"
+
+    async def test_starred_exempt_from_interactive_cutoff(
+        self, sm: SessionManager, db: Database,
+    ):
+        """A starred interactive session survives the short idle cutoff."""
+        await sm.get_or_create("idle-star", source="web")
+        await self._set_idle_hours_ago(db, "idle-star", hours=5)
+        await sm.set_starred("idle-star", True)
+
+        stats = await sm.run_cleanup(
+            archive_after_days=30, interactive_archive_after_hours=1,
+        )
+
+        assert stats["archived_interactive"] == 0
+        assert (await db.get_session("idle-star"))["status"] == "idle"
+
+    async def test_starred_exempt_from_stale_backstop(
+        self, sm: SessionManager, db: Database,
+    ):
+        """A starred session survives the long age backstop."""
+        await sm.get_or_create("stale-star")
+        await db.update_session_fields(
+            "stale-star", {"status": "idle", "starred": 1},
+        )
+        await db.db.execute(
+            "UPDATE sessions SET updated_at = '2020-01-01T00:00:00' WHERE id = 'stale-star'"
+        )
+        await db.db.commit()
+
+        await sm.run_cleanup(archive_after_days=30, max_sessions=1000)
+
+        assert (await db.get_session("stale-star"))["status"] == "idle"
+
+    async def test_starred_off_budget_no_eviction_when_only_starred(
+        self, sm: SessionManager, db: Database,
+    ):
+        """Starred sessions are off-budget: a population of only starred
+        sessions over the cap triggers no overflow eviction at all."""
+        for i in range(3):
+            sid = f"star-{i}"
+            await sm.get_or_create(sid)
+            await db.update_session_fields(sid, {"status": "idle", "starred": 1})
+
+        stats = await sm.run_cleanup(archive_after_days=30, max_sessions=1)
+
+        assert stats["archived_overflow"] == 0
+        for i in range(3):
+            assert (await db.get_session(f"star-{i}"))["status"] == "idle"
+
+    async def test_overflow_bounds_unstarred_and_ignores_starred(
+        self, sm: SessionManager, db: Database,
+    ):
+        """The cap governs only non-starred sessions: starred are off-budget
+        and untouched, while unstarred are evicted down to the limit."""
+        for i in range(2):
+            sid = f"kept-star-{i}"
+            await sm.get_or_create(sid)
+            await db.update_session_fields(sid, {"status": "idle", "starred": 1})
+        for i in range(3):
+            sid = f"disposable-{i}"
+            await sm.get_or_create(sid)
+            await db.update_session_fields(sid, {"status": "idle"})
+
+        await sm.run_cleanup(archive_after_days=30, max_sessions=1)
+
+        # Both starred survive (off-budget, non-evictable).
+        for i in range(2):
+            assert (await db.get_session(f"kept-star-{i}"))["status"] == "idle"
+        # Unstarred are bounded to the cap regardless of the starred count.
+        live_unstarred = [
+            s for s in await db.list_sessions(include_archived=False)
+            if not s.get("starred")
+        ]
+        assert len(live_unstarred) == 1
+
+    async def test_set_and_toggle_starred(self, sm: SessionManager, db: Database):
+        await sm.get_or_create("star-me")
+        assert await sm.set_starred("star-me", True) is True
+        assert (await db.get_session("star-me"))["starred"] == 1
+        assert await sm.toggle_starred("star-me") is False
+        assert (await db.get_session("star-me"))["starred"] == 0
+
+    async def test_set_starred_not_found(self, sm: SessionManager):
+        with pytest.raises(ValueError):
+            await sm.set_starred("nonexistent", True)
 
 
 @pytest.mark.asyncio
