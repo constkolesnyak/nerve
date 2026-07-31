@@ -893,13 +893,19 @@ def create_app() -> FastAPI:
         return {"status": "ok", "version": "0.1.0"}
 
     # Gigaku vocabulary site — a static page rendered by the Mac's `gigaku publish` into
-    # ~/nerve/data/gigaku-site (bind-mounted read-only at /srv/gigaku). html=True serves
-    # index.html for the bare /gigaku/. Registered BEFORE the SPA catch-all for the same
-    # reason as /mcp/v1 above: /{path:path} would shadow it. Guarded so a deployment
-    # without the mount simply has no /gigaku instead of failing to start.
-    gigaku_site = Path("/srv/gigaku")
-    if gigaku_site.is_dir():
-        app.mount("/gigaku", StaticFiles(directory=str(gigaku_site), html=True), name="gigaku")
+    # ~/nerve/data/gigaku-site. That directory is already inside the container via the
+    # existing ~/nerve/data bind (/root/.nerve), so no new mount — and therefore no
+    # container recreate — is needed to serve it: a plain restart loads this code. The
+    # dedicated read-only /srv/gigaku mount (docker-compose.yml) is preferred when a
+    # future recreate makes it exist. html=True serves index.html for the bare /gigaku/.
+    # Registered BEFORE the SPA catch-all for the same reason as /mcp/v1 above:
+    # /{path:path} would shadow it. Guarded so a deployment without either path simply
+    # has no /gigaku instead of failing to start.
+    for gigaku_site in (Path("/srv/gigaku"), Path("/root/.nerve/gigaku-site")):
+        if gigaku_site.is_dir():
+            app.mount("/gigaku", StaticFiles(directory=str(gigaku_site), html=True),
+                      name="gigaku")
+            break
 
     # Serve static web UI files if built
     web_dist = Path(__file__).parent.parent.parent / "web" / "dist"
