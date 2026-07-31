@@ -892,6 +892,15 @@ def create_app() -> FastAPI:
     async def health():
         return {"status": "ok", "version": "0.1.0"}
 
+    # Gigaku vocabulary site — a static page rendered by the Mac's `gigaku publish` into
+    # ~/nerve/data/gigaku-site (bind-mounted read-only at /srv/gigaku). html=True serves
+    # index.html for the bare /gigaku/. Registered BEFORE the SPA catch-all for the same
+    # reason as /mcp/v1 above: /{path:path} would shadow it. Guarded so a deployment
+    # without the mount simply has no /gigaku instead of failing to start.
+    gigaku_site = Path("/srv/gigaku")
+    if gigaku_site.is_dir():
+        app.mount("/gigaku", StaticFiles(directory=str(gigaku_site), html=True), name="gigaku")
+
     # Serve static web UI files if built
     web_dist = Path(__file__).parent.parent.parent / "web" / "dist"
     if web_dist.exists():
