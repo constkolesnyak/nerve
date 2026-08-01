@@ -17,6 +17,10 @@ dependencies = [
     "pyjwt>=2.10.0",
     "bcrypt>=4.2.0",
     "httpx>=0.28.0",
+    # Floor for the anyio 4.13 CancelScope CPU hot-loop fix (anyio issue #1111,
+    # released in 4.14.2). nerve used to carry a monkey-patch for this
+    # (nerve/_anyio_patch.py); the pin makes it unnecessary.
+    "anyio>=4.14.2",
     "websockets>=14.0",
     "click>=8.1.0",
     "telethon>=1.38.0",
