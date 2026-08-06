@@ -49,11 +49,19 @@ def _xmemory_package_stub(monkeypatch):
     """Inject a stub ``xmemory`` package so tests that exercise the enabled
     bridge path work without installing ``xmemory-ai``.
 
+    The real package wins when it is installed: probing ``sys.modules`` alone
+    would stub an installed-but-not-yet-imported package, and then any test
+    that builds real SDK models (``ReadResult``) gets MagicMocks instead —
+    ``_serialize_read_payload`` on a MagicMock spins forever, because every
+    ``model_dump()`` json.dumps asks for returns yet another mock.
+
     Tests that check the unavailable path (e.g. ``test_bridge_disabled_when_package_missing``)
     override this by calling ``monkeypatch.setitem(sys.modules, "xmemory", None)``
     inside the test body, which takes precedence.
     """
-    if sys.modules.get("xmemory") is None:
+    try:
+        import xmemory  # noqa: F401
+    except ImportError:
         stub = MagicMock(name="xmemory")
         stub.AsyncXmemoryClient = MagicMock()
         stub.ExtractionLogic = MagicMock()
@@ -113,7 +121,10 @@ def test_nerveconfig_wires_xmemory_block() -> None:
 def test_serialize_prefers_reader_results() -> None:
     """When the server decomposes the query, the per-sub-query results win, and
     the SDK's Pydantic models are unwrapped to plain dicts for JSON."""
-    from xmemory import ReadResult, TaggedReaderResult
+    # Real models only: the MagicMock stub would send the serializer into an
+    # endless mock-unwrapping loop, so skip rather than exercise the stub.
+    xmemory = pytest.importorskip("xmemory")
+    ReadResult, TaggedReaderResult = xmemory.ReadResult, xmemory.TaggedReaderResult
 
     result = ReadResult(
         trace_id="t",

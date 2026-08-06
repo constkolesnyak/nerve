@@ -650,7 +650,10 @@ class TestCredentialWaterfall:
 
     def test_resolve_claude_from_oauth_env(self) -> None:
         """CLAUDE_CODE_OAUTH_TOKEN env var should be picked up."""
-        with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-test"}, clear=False):
+        # Kill the keychain steps: on a developer Mac they outrank the env var
+        # and hand the test the machine's real `claude login` token.
+        with patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-test"}, clear=False), \
+             patch("nerve.bootstrap.shutil.which", return_value=None):
             token, source, debug = _resolve_claude_credential()
         assert token == "sk-ant-oat01-test"
         assert source == "CLAUDE_CODE_OAUTH_TOKEN env var"
@@ -661,6 +664,7 @@ class TestCredentialWaterfall:
         # Point credentials file at a non-existent path so the real one isn't found
         fake_creds = tmp_path / "nonexistent" / ".credentials.json"
         with patch.dict(os.environ, env, clear=False), \
+             patch("nerve.bootstrap.shutil.which", return_value=None), \
              patch("nerve.bootstrap.Path.expanduser", return_value=fake_creds):
             # Remove CLAUDE_CODE_OAUTH_TOKEN if set
             os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
@@ -701,7 +705,8 @@ class TestCredentialWaterfall:
             "CLAUDE_CODE_OAUTH_TOKEN": "oauth-token",
             "ANTHROPIC_API_KEY": "api-key",
         }
-        with patch.dict(os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=False), \
+             patch("nerve.bootstrap.shutil.which", return_value=None):
             token, source, debug = _resolve_claude_credential()
         assert token == "oauth-token"
         assert "CLAUDE_CODE_OAUTH_TOKEN" in source

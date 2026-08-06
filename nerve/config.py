@@ -1594,23 +1594,23 @@ class CronMessagesConfig:
     plural_rule: str = "simple"
 
     @classmethod
+    @_coerced
     def from_dict(cls, d: dict) -> CronMessagesConfig:
         base = cls()
-        forms = d.get("plural_forms") or base.plural_forms
         return cls(
-            auth_lost_title=str(d.get("auth_lost_title", base.auth_lost_title)),
-            auth_lost_body=str(d.get("auth_lost_body", base.auth_lost_body)),
-            run_failed_title=str(d.get("run_failed_title", base.run_failed_title)),
-            run_failed_body=str(d.get("run_failed_body", base.run_failed_body)),
-            auth_restored_title=str(
-                d.get("auth_restored_title", base.auth_restored_title)),
-            auth_restored_body=str(
-                d.get("auth_restored_body", base.auth_restored_body)),
-            catchup_title=str(d.get("catchup_title", base.catchup_title)),
-            catchup_body=str(d.get("catchup_body", base.catchup_body)),
-            line_prefix=str(d.get("line_prefix", base.line_prefix)),
-            plural_forms=[str(f) for f in forms],
-            plural_rule=str(d.get("plural_rule", base.plural_rule)),
+            auth_lost_title=d.get("auth_lost_title", base.auth_lost_title),
+            auth_lost_body=d.get("auth_lost_body", base.auth_lost_body),
+            run_failed_title=d.get("run_failed_title", base.run_failed_title),
+            run_failed_body=d.get("run_failed_body", base.run_failed_body),
+            auth_restored_title=d.get(
+                "auth_restored_title", base.auth_restored_title),
+            auth_restored_body=d.get(
+                "auth_restored_body", base.auth_restored_body),
+            catchup_title=d.get("catchup_title", base.catchup_title),
+            catchup_body=d.get("catchup_body", base.catchup_body),
+            line_prefix=d.get("line_prefix", base.line_prefix),
+            plural_forms=d.get("plural_forms") or base.plural_forms,
+            plural_rule=d.get("plural_rule", base.plural_rule),
         )
 
 

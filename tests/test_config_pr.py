@@ -568,8 +568,13 @@ class TestRealGit:
         )
 
     def _out(self, *args, cwd):
+        # Same hermetic HOME as _git: without it the developer's global
+        # gitconfig leaks in, and e.g. `color.ui = always` laces the output
+        # with ANSI codes that break the substring assertions below.
+        import os
         return subprocess.run(
             ["git", *args], cwd=str(cwd), capture_output=True, text=True,
+            env={"HOME": str(cwd), "PATH": os.environ["PATH"]},
         ).stdout.strip()
 
     def _setup(self, tmp_path, settings="timezone: UTC\n"):
