@@ -53,6 +53,9 @@ Dockerfile
 docker-compose.yml
 docker-entrypoint.sh
 .dockerignore
+# Local too: COPY'd by the Dockerfile above, and specific to this machine's
+# vox-harbor mount — nothing upstream can use it.
+voxenv
 
 # OS
 .DS_Store
