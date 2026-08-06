@@ -251,14 +251,27 @@ class TestBuildGate:
         with pytest.raises(GateConfigError):
             build_gate(["not", "a", "dict"])  # type: ignore[arg-type]
 
-    def test_build_gates_skips_invalid(self):
-        """An invalid spec is dropped; valid ones still build."""
+    def test_build_gates_refuses_an_invalid_spec(self):
+        """One unbuildable spec fails the lot, rather than being left out.
+
+        Silently dropping it would widen the job from "only when these hold" to
+        "whenever the schedule says", which is the opposite of what a gate is
+        for. The caller loses the job instead; see build_gates' docstring.
+        """
+        with pytest.raises(GateConfigError, match="bogus"):
+            build_gates([
+                {"type": "tasks", "status": "pending"},
+                {"type": "bogus"},
+            ])
+        with pytest.raises(GateConfigError):
+            build_gates([{"type": "messages"}])  # no sources → invalid
+
+    def test_build_gates_builds_every_valid_spec(self):
         gates = build_gates([
             {"type": "tasks", "status": "pending"},
-            {"type": "bogus"},
-            {"type": "messages"},  # no sources → invalid
+            {"type": "messages", "sources": ["gmail"]},
         ])
-        assert len(gates) == 1
+        assert len(gates) == 2
         assert isinstance(gates[0], TasksGate)
 
     def test_build_gates_empty(self):
@@ -359,6 +372,40 @@ class TestCronJobGates:
         })
         assert len(job.gates) == 1
         assert isinstance(job.gates[0], TasksGate)
+
+    def test_from_dict_normalizes_only_a_bare_key(self):
+        """A bare `run_if:` is None and means "no gates". Nothing else does:
+        a wrong shape has to survive on the job so `nerve config validate` can
+        reject it, instead of turning into an ungated job that looks correct."""
+        bare = CronJob.from_dict({"id": "x", "schedule": "1h", "prompt": "p",
+                                  "run_if": None, "skip_when_idle": None})
+        assert bare.run_if == [] and bare.skip_when_idle == []
+
+        # gates=False is how validation loads a bundle: the shape is kept intact
+        # for inspection rather than built (and refused).
+        for shape in ({}, "", 0, "tasks", {"type": "tasks"}):
+            job = CronJob.from_dict({
+                "id": "x", "schedule": "1h", "prompt": "p", "run_if": shape,
+            }, gates=False)
+            assert job.run_if == shape, f"{shape!r} was normalized away"
+            job = CronJob.from_dict({
+                "id": "x", "schedule": "1h", "prompt": "p",
+                "skip_when_idle": shape,
+            }, gates=False)
+            assert job.skip_when_idle == shape, f"{shape!r} was normalized away"
+
+    def test_a_wrong_shape_is_refused_not_run_unguarded(self):
+        """__post_init__ builds the gates, so this drops the whole job — which is
+        the intent. A gate block nobody can read is not permission to run."""
+        with pytest.raises(GateConfigError, match="run_if"):
+            CronJob.from_dict({
+                "id": "x", "schedule": "1h", "prompt": "p", "run_if": 0,
+            })
+        with pytest.raises(GateConfigError, match="skip_when_idle"):
+            CronJob.from_dict({
+                "id": "x", "schedule": "1h", "prompt": "p",
+                "skip_when_idle": {},
+            })
 
 
 # ---------------------------------------------------------------------------

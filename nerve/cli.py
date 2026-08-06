@@ -30,6 +30,7 @@ from pathlib import Path
 
 import click
 
+from nerve import paths
 from nerve.config import (
     RESUME_QUEUE_FILE,
     load_config,
@@ -38,10 +39,9 @@ from nerve.config import (
     write_config_pointer,
 )
 
-# Default PID file location
-PID_DIR = Path("~/.nerve").expanduser()
-PID_FILE = PID_DIR / "nerve.pid"
-LOG_FILE = PID_DIR / "nerve.log"
+# PID / log file locations resolve lazily through nerve.paths so that a
+# NERVE_HOME override (e.g. in tests or multi-instance setups) is always
+# honored — nothing is frozen at import time.
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -62,7 +62,7 @@ def setup_logging(verbose: bool = False) -> None:
 def _read_pid() -> int | None:
     """Read PID from file. Returns None if no valid PID file."""
     try:
-        pid = int(PID_FILE.read_text().strip())
+        pid = int(paths.pid_file().read_text().strip())
         return pid
     except (FileNotFoundError, ValueError):
         return None
@@ -80,14 +80,14 @@ def _is_running(pid: int) -> bool:
 
 
 def _write_pid(pid: int, config_dir: Path | None = None) -> None:
-    PID_DIR.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(str(pid))
+    paths.nerve_home().mkdir(parents=True, exist_ok=True)
+    paths.pid_file().write_text(str(pid))
     if config_dir is not None:
         write_config_pointer(config_dir)
 
 
 def _remove_pid() -> None:
-    PID_FILE.unlink(missing_ok=True)
+    paths.pid_file().unlink(missing_ok=True)
 
 
 def _get_daemon_status() -> tuple[bool, int | None]:
@@ -169,6 +169,12 @@ def _docker_compose(
     return result.returncode
 
 
+# Commands that must keep working when the config itself is broken -- they are
+# how an operator diagnoses or repairs it. They receive ctx.obj["config"] = None
+# and ctx.obj["config_error"], and are responsible for reporting.
+_SELF_DIAGNOSING_COMMANDS = frozenset({"config", "doctor", "init", "migrate"})
+
+
 @click.group()
 @click.option(
     "--config-dir", "-c", type=click.Path(), default=None,
@@ -185,10 +191,34 @@ def main(ctx: click.Context, config_dir: str | None, verbose: bool) -> None:
     resolved_dir, config_source = resolve_config_dir(config_dir)
     if not resolved_dir.is_absolute():
         resolved_dir = resolved_dir.resolve()
-    config = load_config(resolved_dir)
-    set_config(config)
+    config = None
+    config_error = None
+    try:
+        config = load_config(resolved_dir)
+        set_config(config)
+    except Exception as e:
+        # This callback runs before *every* subcommand, so a config that won't
+        # load would otherwise take down the commands you reach for to fix it.
+        # The self-diagnosing ones get config=None plus the message and report
+        # it themselves — for any failure at all, since a command whose job is to
+        # explain a broken config is the last place a traceback helps.
+        #
+        # Everything else gets a clean error and a non-zero exit, but only for
+        # the operator's own mistakes: ConfigError (malformed YAML, an
+        # unresolved required ${VAR}) and the plain ValueError that
+        # NerveConfig._validate_backend_config raises for a bad agent.backend or
+        # codex section — ConfigError subclasses ValueError, so one check covers
+        # both. Anything else means nerve itself is broken, not the config, and
+        # keeps its traceback: presenting an internal defect as "Error: <config
+        # problem>" sends the operator to edit a file that was never at fault.
+        if ctx.invoked_subcommand not in _SELF_DIAGNOSING_COMMANDS:
+            if isinstance(e, ValueError):
+                raise click.ClickException(str(e)) from e
+            raise
+        config_error = str(e)
     ctx.ensure_object(dict)
     ctx.obj["config"] = config
+    ctx.obj["config_error"] = config_error
     ctx.obj["config_dir"] = str(resolved_dir)
     ctx.obj["config_source"] = config_source
     ctx.obj["verbose"] = verbose
@@ -212,7 +242,14 @@ def init(ctx: click.Context, if_needed: bool, non_interactive: bool, inside_dock
         if non_interactive:
             click.echo("Nerve is already configured. Skipping.")
             return
-        if not click.confirm("Nerve is already configured. Re-run setup? (Config files will be overwritten, workspace files won't.)"):
+        if not click.confirm(
+            "Nerve is already configured. Re-run setup? (config.yaml and "
+            "config.local.yaml are regenerated; workspace/config/settings.yaml "
+            "keeps any key the wizard doesn't generate; other workspace files "
+            "are untouched. Each of the three that holds any setting is copied "
+            "to *.bak first — an empty or comments-only file is skipped, since "
+            "there is nothing in it to lose.)"
+        ):
             return
 
     if non_interactive:
@@ -238,6 +275,25 @@ def start(ctx: click.Context, foreground: bool) -> None:
     """Start the Nerve server."""
     config_dir = Path(ctx.obj["config_dir"])
     config = ctx.obj["config"]
+
+    # Migrate a legacy install to the workspace/config layout if needed
+    # (idempotent, best-effort). Non-destructive — originals kept as *.migrated.
+    if config is not None:
+        from nerve.migrate import maybe_migrate
+        report = maybe_migrate(config_dir, workspace=getattr(config, "workspace", None))
+        if report is not None and report.did_anything:
+            # The config in hand was loaded from the old locations, and migration
+            # has just moved the files out from under it — cron in particular now
+            # lives in the workspace, so the stale object resolves to job files
+            # that no longer exist and a --foreground run would schedule nothing.
+            try:
+                config = load_config(config_dir)
+            except Exception as e:
+                raise click.ClickException(
+                    f"Config could not be reloaded after migration: {e}"
+                ) from e
+            set_config(config)
+            ctx.obj["config"] = config
 
     # Detect fresh install — offer to run setup wizard
     from nerve.bootstrap import is_fresh_install
@@ -294,9 +350,9 @@ def start(ctx: click.Context, foreground: bool) -> None:
         cmd.extend(["start", "--foreground"])
 
         # Ensure log directory exists
-        PID_DIR.mkdir(parents=True, exist_ok=True)
+        paths.nerve_home().mkdir(parents=True, exist_ok=True)
 
-        log_fd = open(LOG_FILE, "a")
+        log_fd = open(paths.log_file(), "a")
         proc = subprocess.Popen(
             cmd,
             stdout=log_fd,
@@ -310,13 +366,13 @@ def start(ctx: click.Context, foreground: bool) -> None:
         time.sleep(1)
         if proc.poll() is not None:
             click.echo(f"Nerve failed to start (exit code {proc.returncode})")
-            click.echo(f"Check logs: {LOG_FILE}")
+            click.echo(f"Check logs: {paths.log_file()}")
             ctx.exit(1)
             return
 
         click.echo(f"Nerve started (PID {proc.pid})")
         click.echo(f"  Listening on {config.gateway.host}:{config.gateway.port}")
-        click.echo(f"  Logs: {LOG_FILE}")
+        click.echo(f"  Logs: {paths.log_file()}")
 
 
 @main.command()
@@ -486,8 +542,8 @@ def restart(ctx: click.Context, resume_ids: tuple[str, ...]) -> None:
     helper_script = (
         "import os, signal, subprocess, sys, time\n"
         f"old_pid = {old_pid if running else 'None'}\n"
-        f"pid_file = {str(PID_FILE)!r}\n"
-        f"log_file = {str(LOG_FILE)!r}\n"
+        f"pid_file = {str(paths.pid_file())!r}\n"
+        f"log_file = {str(paths.log_file())!r}\n"
         f"start_cmd = {start_cmd_parts!r}\n"
         "if old_pid is not None:\n"
         "    try:\n"
@@ -526,7 +582,7 @@ def restart(ctx: click.Context, resume_ids: tuple[str, ...]) -> None:
         "    sys.exit(1)\n"
     )
 
-    log_fd = open(LOG_FILE, "a")
+    log_fd = open(paths.log_file(), "a")
     subprocess.Popen(
         [sys.executable, "-c", helper_script],
         stdout=log_fd,
@@ -595,14 +651,14 @@ def status(ctx: click.Context, follow: bool) -> None:
 
         config = ctx.obj["config"]
         click.echo(f"  Listening on {config.gateway.host}:{config.gateway.port}")
-        click.echo(f"  Logs: {LOG_FILE}")
+        click.echo(f"  Logs: {paths.log_file()}")
     else:
         click.echo("Nerve is not running")
 
-    if follow and LOG_FILE.exists():
-        click.echo(f"\n--- Tailing {LOG_FILE} ---")
+    if follow and paths.log_file().exists():
+        click.echo(f"\n--- Tailing {paths.log_file()} ---")
         try:
-            os.execlp("tail", "tail", "-f", str(LOG_FILE))
+            os.execlp("tail", "tail", "-f", str(paths.log_file()))
         except Exception:
             click.echo("Cannot tail log file")
 
@@ -619,16 +675,16 @@ def logs(ctx: click.Context) -> None:
         _docker_compose(config_dir, ["logs", "-f"], replace_process=True)
         return  # unreachable
 
-    if not LOG_FILE.exists():
-        click.echo(f"No log file at {LOG_FILE}")
+    if not paths.log_file().exists():
+        click.echo(f"No log file at {paths.log_file()}")
         return
 
-    click.echo(f"--- {LOG_FILE} ---")
+    click.echo(f"--- {paths.log_file()} ---")
     try:
-        os.execlp("tail", "tail", "-f", str(LOG_FILE))
+        os.execlp("tail", "tail", "-f", str(paths.log_file()))
     except Exception:
         # Fallback: print last 50 lines
-        lines = LOG_FILE.read_text().splitlines()
+        lines = paths.log_file().read_text().splitlines()
         for line in lines[-50:]:
             click.echo(line)
 
@@ -735,17 +791,66 @@ def upgrade(ctx: click.Context, no_frontend: bool, no_deps: bool, no_pull: bool)
         if rc != 0:
             raise click.ClickException("npm run build failed")
 
+    # Migrate a legacy config layout to workspace/config (idempotent).
+    if config is not None:
+        from nerve.migrate import maybe_migrate
+        report = maybe_migrate(
+            Path(ctx.obj["config_dir"]), workspace=getattr(config, "workspace", None)
+        )
+        if report and report.did_anything:
+            click.echo("\nMigrated config to the workspace layout:")
+            for action in report.actions:
+                click.echo(f"  - {action}")
+            if report.error:
+                # The steps above did apply. Saying so beats a bare success
+                # message, because the rest has to be finished by hand or by a
+                # re-run, and the tracked file already exists either way.
+                click.secho(
+                    f"  Migration did not finish: {report.error}\n"
+                    "  What is listed above was applied; re-run `nerve migrate` "
+                    "once the cause is fixed.",
+                    fg="yellow",
+                )
+            if report.secrets_moved:
+                click.echo(
+                    f"  (scrubbed {len(report.secrets_moved)} secret(s) into "
+                    "config.local.yaml; review workspace/config/settings.yaml "
+                    "before committing)"
+                )
+            if report.machine_local_kept:
+                click.echo(
+                    f"  ({len(report.machine_local_kept)} machine-local key(s) kept "
+                    "in config.yaml instead of published: "
+                    f"{', '.join(report.machine_local_kept)})"
+                )
+            if report.suspect_values:
+                click.secho(
+                    f"  ({len(report.suspect_values)} value(s) left in settings.yaml "
+                    f"still look like credentials: {', '.join(report.suspect_values)})",
+                    fg="yellow",
+                )
+            for warning in report.warnings:
+                click.secho(f"  Note: {warning}", fg="yellow")
+
     click.echo("\nUpgrade complete. Restart Nerve for changes to take effect:")
     click.echo("  nerve restart")
 
 
-_CONFIG_SOURCE_LABELS = {
-    "flag": "--config-dir flag",
-    "env": "NERVE_CONFIG_DIR env var",
-    "cwd": "current directory",
-    "pointer": "~/.nerve/config_dir pointer",
-    "default": "current directory (no config found anywhere)",
-}
+def _config_source_label(source: str) -> str:
+    """Human-readable name for where the config directory was discovered.
+
+    A function rather than a module-level dict because the pointer label names
+    a machine-local path: baked in at import time it would report whatever
+    ``NERVE_HOME`` said before the process was fully set up, so doctor output
+    could point the reader at a file that is not the one being consulted.
+    """
+    return {
+        "flag": "--config-dir flag",
+        "env": "NERVE_CONFIG_DIR env var",
+        "cwd": "current directory",
+        "pointer": f"{paths.config_pointer_file()} pointer",
+        "default": "current directory (no config found anywhere)",
+    }.get(source, source)
 
 
 def _check_api_connectivity(config) -> tuple[bool, str]:
@@ -788,14 +893,18 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
     # Where the config came from — surfaces CWD mixups immediately
     config_dir = getattr(config, "config_dir", None)
     if config_dir is not None:
-        source_label = _CONFIG_SOURCE_LABELS.get(config_source, config_source)
+        source_label = _config_source_label(config_source)
         suffix = f" (via {source_label})" if source_label else ""
         has_base = (Path(config_dir) / "config.yaml").exists()
         has_local = (Path(config_dir) / "config.local.yaml").exists()
-        if has_base or has_local:
+        from nerve.config import workspace_settings_file
+        has_settings = workspace_settings_file(config.workspace).exists()
+        if has_base or has_local or has_settings:
             present = " + ".join(
                 n for n, ok in (
-                    ("config.yaml", has_base), ("config.local.yaml", has_local),
+                    ("config.yaml", has_base),
+                    ("config.local.yaml", has_local),
+                    ("workspace/config/settings.yaml", has_settings),
                 ) if ok
             )
             lines.append(f"[OK] Config: {config_dir} ({present}){suffix}")
@@ -806,15 +915,12 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
                 "-c/--config-dir or NERVE_CONFIG_DIR"
             )
 
-    # Unknown / misspelled config keys
+    # Unknown / misspelled config keys — validate the same merged view that
+    # load_config sees (workspace/config/settings.yaml + config.yaml +
+    # config.local.yaml), so typos in the shared settings layer are caught too.
     try:
-        from nerve.config import _deep_merge, validate_config_keys
-        merged: dict = {}
-        for name in ("config.yaml", "config.local.yaml"):
-            p = Path(config_dir or ".") / name
-            if p.exists():
-                import yaml as _yaml
-                merged = _deep_merge(merged, _yaml.safe_load(p.read_text()) or {})
+        from nerve.config import _read_config_sources, validate_config_keys
+        merged = _read_config_sources(Path(config_dir)) if config_dir else {}
         for w in validate_config_keys(merged):
             warnings.append(f"[WARN] config: {w}")
     except Exception:
@@ -847,6 +953,57 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
                     warnings.append(f"  [WARN] {f} not found")
     else:
         errors.append(f"[ERR] Workspace not found: {config.workspace}")
+
+    # Workspace sync. Two questions, because the answers come from different
+    # places: what the daemon's loop last did (retained in-process, so only the
+    # in-daemon /doctor sees it), and whether the reviewed files are clean right
+    # now (a git check any process can run, which is the one that matters from a
+    # shell — a blocked sync leaves the box pinned to an old revision with
+    # nothing but a log line to say so).
+    sync_cfg = getattr(config, "workspace_sync", None)
+    # Also when locked with the loop off: `nerve config sync` is still the only
+    # way config reaches that box, so a refusal is just as terminal there.
+    if sync_cfg is not None and (sync_cfg.enabled or config.lockdown):
+        try:
+            from nerve.sync_service import (
+                _describe_paths,
+                last_sync_state,
+                local_block_reasons,
+            )
+
+            state = last_sync_state()
+            if state is not None:
+                age = max(0, int(time.time() - state.checked_at))
+                if state.ok:
+                    lines.append(
+                        f"[OK] Workspace sync: applied "
+                        f"{state.applied_rev[:8] or '(unknown)'}, last checked "
+                        f"{age}s ago"
+                    )
+                else:
+                    # Covers the failures the local check below cannot see: a
+                    # dead remote, a diverged branch, an invalid bundle.
+                    warnings.append(
+                        f"[WARN] Workspace sync: last cycle ({age}s ago) failed "
+                        f"— {state.message}"
+                    )
+                for name, why in sorted(state.reload_errors.items()):
+                    warnings.append(
+                        f"[WARN] Workspace sync: {name} did not take the merged "
+                        f"config ({why}) — retried every cycle"
+                    )
+            blocking = local_block_reasons(config.workspace, config.lockdown)
+            if blocking:
+                warnings.append(
+                    f"[WARN] Workspace sync BLOCKED: the reviewed files have "
+                    f"local changes, so no merged config reaches this instance "
+                    f"— {_describe_paths(blocking)}. Commit them, discard them, "
+                    f"or re-propose them as a PR with propose_config_change"
+                )
+            else:
+                lines.append("[OK] Workspace sync: reviewed files clean")
+        except Exception as e:
+            warnings.append(f"[WARN] Workspace sync check failed: {e}")
 
     # Check proxy
     if config.proxy.enabled:
@@ -895,6 +1052,19 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
             lines.append("[--] Anthropic API key not set (using proxy)")
     elif config.anthropic_api_key:
         lines.append(f"[OK] Anthropic API key: ...{config.anthropic_api_key[-4:]}")
+    elif config.lockdown:
+        # The generic message names config.local.yaml, which a locked instance
+        # never reads. The cause is also often upstream of the key: if the
+        # provider block was only in config.yaml, this instance has already
+        # reverted to the Anthropic default and is failing for a key it would not
+        # otherwise need.
+        errors.append(
+            "[ERR] No Anthropic API key. Lockdown does not read "
+            "config.local.yaml, so supply it as ${ANTHROPIC_API_KEY} in "
+            "workspace/config/settings.yaml. If this box should be using "
+            "Bedrock, provider.type is absent from the tracked settings and this "
+            "instance has fallen back to 'anthropic'"
+        )
     else:
         errors.append("[ERR] Anthropic API key not set and proxy not enabled (config.local.yaml)")
 
@@ -956,7 +1126,7 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
         warnings.append("[WARN] JWT secret not set — running in dev mode")
 
     # Check DB
-    db_path = Path("~/.nerve/nerve.db").expanduser()
+    db_path = paths.db_path()
     if db_path.exists():
         lines.append(f"[OK] Database: {db_path} ({db_path.stat().st_size / 1024:.1f} KB)")
     else:
@@ -964,7 +1134,7 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
 
     # Check cron files (merge like the scheduler does: user jobs override system by ID)
     try:
-        from nerve.cron.jobs import load_jobs
+        from nerve.cron.jobs import describe_reserved_job_ids, is_reserved_job_id, load_jobs
 
         system_jobs = load_jobs(config.cron.system_file) if config.cron.system_file.exists() else []
         user_jobs = load_jobs(config.cron.jobs_file) if config.cron.jobs_file.exists() else []
@@ -974,6 +1144,18 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
         overridden = sum(1 for j in user_jobs if j.id in merged)
         for j in user_jobs:
             merged[j.id] = j
+
+        # Jobs on a reserved id are dropped by the scheduler, so counting them
+        # would report crons that can never fire. Call them out instead.
+        reserved_ids = sorted(jid for jid in merged if is_reserved_job_id(jid))
+        for jid in reserved_ids:
+            del merged[jid]
+        if reserved_ids:
+            warnings.append(
+                f"[WARN] Cron job(s) {', '.join(reserved_ids)} use ids reserved "
+                f"by the daemon ({describe_reserved_job_ids()}) and are never "
+                f"scheduled — rename them"
+            )
 
         all_jobs = list(merged.values())
         enabled = sum(1 for j in all_jobs if j.enabled)
@@ -1032,7 +1214,7 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
     else:
         lines.append(
             "[--] Backups not configured — set backup.target_dir + enabled to "
-            "protect ~/.nerve against disk loss"
+            f"protect {paths.home_label()} against disk loss"
         )
 
     # Check external tools
@@ -1061,6 +1243,15 @@ def doctor_report(config, config_source: str = "", check_api: bool = False) -> s
 def doctor(ctx: click.Context) -> None:
     """Check config, DB, API keys, and connectivity."""
     config = ctx.obj["config"]
+    if config is None:
+        # The config wouldn't load at all — that *is* the diagnosis.
+        click.echo("Nerve Doctor")
+        click.echo("=" * 40)
+        click.echo(f"Config dir: {ctx.obj.get('config_dir')}")
+        click.secho(
+            f"[ERR] config failed to load: {ctx.obj.get('config_error')}", fg="red"
+        )
+        ctx.exit(1)
     report = doctor_report(
         config,
         config_source=ctx.obj.get("config_source", ""),
@@ -1069,6 +1260,353 @@ def doctor(ctx: click.Context) -> None:
     click.echo(report)
     if "[ERR]" in report:
         ctx.exit(1)
+
+
+# Bind addresses that name no connectable destination, so a client on the same
+# box has to ask for loopback instead.
+_WILDCARD_BINDS = ("", "0.0.0.0", "::", "*")
+
+
+def _gateway_url(config, path: str) -> str:
+    """URL for a loopback call to this box's own gateway.
+
+    ``gateway.host`` is a *bind* address, not necessarily somewhere a client can
+    connect to; see :data:`_WILDCARD_BINDS`.
+    """
+    scheme = "https" if config.gateway.ssl.enabled else "http"
+    host = config.gateway.host
+    if host in _WILDCARD_BINDS:
+        host = "127.0.0.1"
+    return f"{scheme}://{host}:{config.gateway.port}{path}"
+
+
+@main.command()
+@click.pass_context
+def reload(ctx: click.Context) -> None:
+    """Apply config edits to the running daemon without restarting it.
+
+    Re-reads config.yaml, config.local.yaml and the workspace settings, then
+    reloads cron jobs, cron sources, MCP servers and skills. Anything that needs
+    a restart instead is listed rather than silently skipped; `docs/config.md`
+    has the full table.
+    """
+    import httpx
+
+    from nerve.gateway.auth import create_token
+
+    config = ctx.obj["config"]
+    if config is None:
+        raise click.ClickException(
+            f"Config could not be loaded ({ctx.obj.get('config_error')}); "
+            "run 'nerve config validate' to see why."
+        )
+    if not config.auth.jwt_secret and config.lockdown:
+        raise click.ClickException(
+            "No auth.jwt_secret in the config read here, and a locked gateway "
+            "never runs open, so nothing sent from this shell can be "
+            "authenticated. If the secret comes from ${ENV_VAR}, export it here "
+            "too; if the daemon has none either, it is refusing every request "
+            "and needs one before it can be reloaded."
+        )
+    url = _gateway_url(config, "/api/config/reload")
+    # Certificate verification stands except in the one case where it cannot
+    # hold: a wildcard bind means the request goes to 127.0.0.1, and the
+    # daemon's certificate is issued for a hostname, so checking it there would
+    # fail on exactly the setups that bothered to configure TLS. When
+    # gateway.host names a real host the certificate should match it, and a
+    # failure there is worth hearing about rather than skipping past.
+    verify = config.gateway.host not in _WILDCARD_BINDS
+    # A token when there is a secret to sign one with, and otherwise none: an
+    # unlocked gateway with no auth.jwt_secret does not ask for one (require_auth
+    # runs open there), so an empty secret is not a reason to refuse to call. The
+    # operator hand-editing config on a dev box is the likeliest caller of all.
+    headers = {}
+    if config.auth.jwt_secret:
+        headers["Authorization"] = f"Bearer {create_token(config.auth.jwt_secret)}"
+    try:
+        resp = httpx.post(
+            url,
+            headers=headers,
+            verify=verify,
+            # A reload re-reads config and rebuilds cron, sources, MCP and
+            # skills; MCP servers in particular can take a while to come up.
+            timeout=120,
+        )
+    except httpx.ConnectError:
+        raise click.ClickException(
+            f"No daemon answering at {url}, which is the address in the config "
+            "read here. If gateway.host, gateway.port or the SSL settings were "
+            "part of the edit, the running daemon is still bound to the old "
+            "address and only a restart moves it. Otherwise nothing is running, "
+            "and a stopped daemon reads config fresh when it starts "
+            "('nerve start')."
+        ) from None
+    except httpx.HTTPError as e:
+        raise click.ClickException(f"Could not reach {url}: {e}") from None
+    if resp.status_code in (401, 403):
+        raise click.ClickException(
+            "The gateway rejected the request. The running daemon's "
+            "auth.jwt_secret is not the one read here — it either started with a "
+            "different value, or with one this config no longer supplies. Restart "
+            "it to pick up the current config."
+        )
+    if resp.status_code != 200:
+        raise click.ClickException(f"{url} returned {resp.status_code}: {resp.text[:400]}")
+
+    body = resp.json()
+    errors = body.get("errors") or {}
+    for name, outcome in (body.get("detail") or {}).items():
+        if name == "restart_required":
+            continue
+        if name in errors:
+            click.secho(f"  [ERR] {name}: {errors[name]}", fg="red")
+            continue
+        if isinstance(outcome, dict):
+            outcome = ", ".join(f"{k}={v}" for k, v in outcome.items())
+        click.echo(f"  {name}: {outcome}")
+    if body.get("restart_required"):
+        click.secho(
+            f"  [WARN] changed but needs a restart: {body['restart_required']}",
+            fg="yellow",
+        )
+    if body.get("ok"):
+        click.secho("Config reloaded", fg="green")
+    else:
+        # Partial by design: a bad settings.yaml must not block a valid cron
+        # edit. Non-zero so a script doesn't read this as a clean apply.
+        click.secho("Config reload incomplete — see the errors above", fg="red")
+        ctx.exit(1)
+
+
+@main.command()
+@click.option("--dry-run", is_flag=True, help="Show what would change without writing.")
+@click.pass_context
+def migrate(ctx: click.Context, dry_run: bool) -> None:
+    """Migrate a legacy config layout into the workspace/config subtree.
+
+    Splits config.yaml: shareable keys → workspace/config/settings.yaml (secrets
+    scrubbed into config.local.yaml as ${ENV_VAR} refs), machine-local keys stay
+    in config.yaml. Also moves ~/.nerve/cron → workspace/config/cron.
+    Non-destructive (originals kept as *.migrated) and idempotent.
+    """
+    from nerve.migrate import migrate as run_migrate
+
+    config = ctx.obj["config"]
+    config_dir = Path(ctx.obj["config_dir"])
+    workspace = getattr(config, "workspace", None) if config is not None else None
+    try:
+        report = run_migrate(config_dir, workspace=workspace, dry_run=dry_run)
+    except Exception as e:  # e.g. a malformed config.local.yaml
+        raise click.ClickException(f"Migration failed: {e}") from e
+
+    if not report.did_anything:
+        click.secho("Nothing to migrate — already on the workspace layout.", fg="green")
+        for warning in report.warnings:
+            click.secho(f"  Note: {warning}", fg="yellow")
+        return
+    prefix = "[dry-run] would " if dry_run else ""
+    for action in report.actions:
+        click.echo(f"  {prefix}{action}")
+    for warning in report.warnings:
+        click.secho(f"\n  Note: {warning}", fg="yellow")
+    if report.secrets_moved:
+        click.echo(f"\n  Secrets scrubbed to config.local.yaml: {', '.join(report.secrets_moved)}")
+    if report.machine_local_kept:
+        click.echo(
+            "\n  Machine-local keys kept in config.yaml: "
+            f"{', '.join(report.machine_local_kept)}"
+        )
+    if report.suspect_values:
+        click.secho(
+            f"\n  {len(report.suspect_values)} value(s) headed for settings.yaml still "
+            f"look like credentials — review: {', '.join(report.suspect_values)}",
+            fg="yellow",
+        )
+    if dry_run:
+        click.secho("\nDry run — no changes written.", fg="yellow")
+    else:
+        click.secho("\nMigration complete. Review workspace/config/settings.yaml before committing.", fg="green")
+
+
+@main.group(name="config")
+def config_group() -> None:
+    """Configuration commands."""
+
+
+@config_group.command("sync")
+@click.option("--branch", default="", help="Branch to pull (default: current tracking branch).")
+@click.option("--no-validate", is_flag=True, help="Skip validating the pulled bundle.")
+@click.option(
+    "--no-strict-env", is_flag=True,
+    help="Allow unset ${ENV_VAR} references in the pulled bundle. Normally they "
+         "block the merge, because the daemon refuses to load a config with an "
+         "unresolved required variable. Use this when your shell doesn't carry "
+         "the daemon's environment (systemd/docker). Otherwise follows "
+         "workspace_sync.strict_env.",
+)
+@click.pass_context
+def config_sync(
+    ctx: click.Context, branch: str, no_validate: bool, no_strict_env: bool,
+) -> None:
+    """Pull the workspace from its git remote (the shared config repo).
+
+    Fast-forward only. This moves the files; it does not tell a running daemon
+    about them. The daemon applies them on its next sync cycle, because that loop
+    compares what is on disk against the revision it last applied. For that to
+    happen sooner, run `nerve reload`: POST /api/config/sync would find nothing
+    left to merge and reload nothing.
+    """
+    from nerve.sync_service import sync_workspace
+
+    config = ctx.obj["config"]
+    if config is None:
+        raise click.ClickException("Config could not be loaded; run 'nerve doctor'.")
+    # Raw values, not Path(...): sync_workspace coerces inside its own
+    # never-raises guard, so a bad `workspace` reports instead of traceback.
+    result = sync_workspace(
+        config.workspace, ctx.obj["config_dir"], branch=branch,
+        validate=not no_validate,
+        strict_env=config.workspace_sync.strict_env and not no_strict_env,
+        locked=config.lockdown,
+    )
+    for warning in result.validation_warnings:
+        click.secho(f"  [WARN] {warning}", fg="yellow")
+    if result.ok:
+        click.secho(result.message, fg="green")
+    else:
+        for err in result.validation_errors:
+            click.secho(f"  [ERR] {err}", fg="red")
+        click.secho(result.message, fg="red")
+        ctx.exit(1)
+
+
+@config_group.command("validate")
+@click.option(
+    "--workspace", "workspace", type=click.Path(), default=None,
+    help="Validate this workspace's config (e.g. a checked-out config repo: "
+         "--workspace .). Defaults to the resolved workspace.",
+)
+@click.option(
+    "--strict-env", is_flag=True,
+    help="Fail if any ${ENV_VAR} reference is unset. Default: allow (CI usually "
+         "has no secrets); unset refs are reported as info.",
+)
+@click.option(
+    "--strict-keys", is_flag=True,
+    help="Fail on unknown/misspelled config keys. Default: warn (a key from a "
+         "newer nerve shouldn't fail CI). Recommended in CI on a config repo, "
+         "where the validator is pinned to the deployed nerve version.",
+)
+@click.option(
+    "--portable-only", is_flag=True,
+    help="Ignore this machine's config.yaml / config.local.yaml and validate "
+         "only the portable workspace config — what a shared repo carries.",
+)
+@click.option(
+    "--assume-lockdown", "assume_locked", is_flag=True,
+    help="Validate the locked view whatever this bundle's lockdown flag resolves "
+         "to here. A fleet repo writes `lockdown: ${NERVE_LOCKDOWN:-false}`, so "
+         "CI resolves it to false and checks a config no locked box will run. Use "
+         "this in CI on any repo one of whose instances is locked.",
+)
+@click.pass_context
+def config_validate(
+    ctx: click.Context, workspace: str | None, strict_env: bool, strict_keys: bool,
+    portable_only: bool, assume_locked: bool,
+) -> None:
+    """Validate the configuration bundle. Non-zero exit on any error (CI-ready)."""
+    from nerve.config_validate import render_result, validate_config_bundle
+
+    config_dir = Path(ctx.obj["config_dir"])
+    result = validate_config_bundle(
+        config_dir, workspace_override=workspace,
+        strict_env=strict_env, strict_keys=strict_keys,
+        portable_only=portable_only, assume_locked=assume_locked,
+    )
+    # Same renderer as `python -m nerve.config_validate` (the no-install path),
+    # just colorized here.
+    lines, summary = render_result(result)
+    _SEVERITY_COLORS = {"[WARN]": "yellow", "[ERR]": "red"}
+    for line in lines:
+        click.secho(line, fg=_SEVERITY_COLORS.get(line.split(" ", 1)[0]))
+    click.secho(summary, fg="green" if result.ok else "red")
+    if not result.ok:
+        ctx.exit(1)
+
+
+@config_group.command("init-repo")
+@click.option(
+    "--workspace", "workspace", type=click.Path(), default=None,
+    help="Workspace to scaffold (default: the resolved workspace).",
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be created without writing.",
+)
+@click.pass_context
+def config_init_repo(
+    ctx: click.Context, workspace: str | None, dry_run: bool,
+) -> None:
+    """Scaffold the workspace into a shareable git config repo.
+
+    Drops a CI validation workflow, a secrets-aware .gitignore, and a README into
+    the workspace (never overwriting existing files), then prints the remaining
+    git/gh and instance-config steps. Safe to re-run.
+    """
+    from nerve.config_repo import scaffold_config_repo
+
+    if workspace:
+        ws = Path(workspace).expanduser()
+    else:
+        config = ctx.obj["config"]
+        if config is None:
+            raise click.ClickException(
+                "Config could not be loaded; pass --workspace or run 'nerve doctor'."
+            )
+        ws = Path(config.workspace)
+
+    if not ws.is_dir():
+        raise click.ClickException(f"Workspace does not exist: {ws}")
+
+    result = scaffold_config_repo(ws, dry_run=dry_run)
+
+    verb = "Would create" if dry_run else "Created"
+    for rel in result.created:
+        click.secho(f"  {verb}: {rel}", fg="green")
+    for rel in result.skipped:
+        click.secho(f"  Skipped (exists): {rel}", fg="yellow")
+    if not result.created:
+        click.echo("Config-repo scaffold already in place — nothing to create.")
+
+    # Remaining steps the CLI can't do for you (they need a repo URL + auth).
+    click.secho("\nNext steps:", bold=True)
+    click.echo(f"  cd {ws}")
+    if not result.is_git_repo:
+        click.echo("  git init && git add -A && git commit -m 'Initial Nerve config'")
+    else:
+        click.echo("  git add -A && git commit -m 'Add config-repo scaffold'")
+    click.echo(
+        "  gh repo create <org>/nerve-config --private --source=. "
+        "--remote=origin --push"
+    )
+    click.echo(
+        "\nCI validates every PR out of the box (no secrets needed) — see\n"
+        ".github/workflows/validate-config.yml. It installs nerve from the\n"
+        "default branch, which stays at or ahead of this instance; append a ref\n"
+        "to that install line to check against one release instead."
+    )
+    click.echo(
+        "\nOn the instance, enable sync in workspace/config/settings.yaml:\n"
+        "  workspace_sync:\n"
+        "    enabled: true\n"
+        "    branch: main\n"
+        "    interval_minutes: 5\n"
+        "Then verify — the same check CI runs, so a pass here means a green PR:\n"
+        f"  nerve config validate --workspace {ws} --portable-only --strict-keys\n"
+        "Drop --portable-only to include this machine's config.yaml and\n"
+        "config.local.yaml, i.e. what the daemon itself loads.\n"
+        "When ready to lock down, set 'lockdown: true' in settings.yaml (move\n"
+        "secrets to ${ENV_VAR} first — see docs/config.md)."
+    )
 
 
 @main.group()
@@ -1111,7 +1649,9 @@ def codex_doctor(ctx: click.Context, json_output: bool) -> None:
     )
 
     config = ctx.obj["config"]
-    backend = CodexBackend(SimpleNamespace(config=config))
+    # deps.config is a callable, not the object — see BackendDeps. Nothing
+    # reloads in a one-shot command, but the backend reads it as a callable.
+    backend = CodexBackend(SimpleNamespace(config=lambda: config))
     status = asyncio.run(backend.preflight(force=True))
     report = {
         "preflight": status,
@@ -1267,7 +1807,7 @@ def setup_telegram(ctx: click.Context) -> None:
         ctx.exit(1)
         return
 
-    session_path = os.path.expanduser("~/.nerve/telegram_sync")
+    session_path = str(paths.nerve_path("telegram_sync"))
     click.echo(f"Telethon session: {session_path}.session")
     click.echo(f"API ID: {api_id}")
     click.echo()
@@ -1315,7 +1855,7 @@ def cron(ctx: click.Context, job_id: str) -> None:
                 await cron_svc.run_job(job_id)
             else:
                 click.echo("Available jobs:")
-                from nerve.cron.jobs import load_jobs
+                from nerve.cron.jobs import is_reserved_job_id, load_jobs
 
                 # Load from both files, show provenance
                 system_jobs = load_jobs(config.cron.system_file)
@@ -1332,7 +1872,13 @@ def cron(ctx: click.Context, job_id: str) -> None:
                         all_jobs.append(("system", j))
 
                 for source, job in all_jobs:
-                    status = "enabled" if job.enabled else "disabled"
+                    # A reserved id is never scheduled by the daemon. Show the
+                    # job rather than hiding it — the reason it isn't running is
+                    # the whole thing the reader is here to find out.
+                    if is_reserved_job_id(job.id):
+                        status = "RESERVED ID — never scheduled, rename it"
+                    else:
+                        status = "enabled" if job.enabled else "disabled"
                     click.echo(
                         f"  [{source:6s}] {job.id}: "
                         f"{job.description or job.schedule} ({status})"
@@ -1368,7 +1914,7 @@ def backup(ctx: click.Context, output: str | None, state_only: bool, no_secrets:
             "in config.yaml (an external mount or synced dir is recommended)."
         )
 
-    nerve_dir = PID_DIR
+    nerve_dir = paths.nerve_home()
     include_workspace = config.backup.include_workspace and not state_only
 
     if not quiet:
@@ -1427,7 +1973,7 @@ def restore(ctx: click.Context, bundle: str, verify_only: bool, force: bool) -> 
     if not bundle_path.is_file():
         raise click.ClickException(f"Bundle not found: {bundle_path}")
 
-    nerve_dir = PID_DIR
+    nerve_dir = paths.nerve_home()
 
     if verify_only:
         try:
@@ -1494,7 +2040,7 @@ def migrate_openclaw(ctx: click.Context, sessions_dir: str, dry_run: bool, min_m
 
     config = ctx.obj["config"]
     sessions_path = Path(sessions_dir).expanduser()
-    conv_dir = Path("~/.nerve/memu-conversations").expanduser()
+    conv_dir = paths.nerve_path("memu-conversations")
 
     if not sessions_path.exists():
         click.echo(f"[ERR] Sessions directory not found: {sessions_path}")
@@ -1741,7 +2287,7 @@ def db_prune(ctx: click.Context, dry_run: bool) -> None:
     from nerve.db import Database
 
     config = ctx.obj["config"]
-    db_path = Path("~/.nerve/nerve.db").expanduser()
+    db_path = paths.db_path()
     if not db_path.exists():
         click.echo(f"[ERR] Database not found: {db_path}")
         ctx.exit(1)
@@ -1796,7 +2342,7 @@ def db_vacuum(ctx: click.Context) -> None:
     from nerve.db import Database
 
     config = ctx.obj["config"]
-    db_path = Path("~/.nerve/nerve.db").expanduser()
+    db_path = paths.db_path()
     if not db_path.exists():
         click.echo(f"[ERR] Database not found: {db_path}")
         ctx.exit(1)
@@ -1849,7 +2395,7 @@ def _format_workflow_run(run: dict) -> str:
 
 
 def _workflow_db_path(ctx: click.Context) -> Path:
-    db_path = Path("~/.nerve/nerve.db").expanduser()
+    db_path = paths.db_path()
     if not db_path.exists():
         click.echo(f"[ERR] Database not found: {db_path}")
         ctx.exit(1)

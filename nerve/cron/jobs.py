@@ -19,6 +19,38 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Scheduler ids the daemon owns; a job defined in system.yaml/jobs.yaml may not
+# claim one. `source:` is reserved as a whole namespace rather than as the set of
+# runners that happen to be live: source runners register as `source:<name>`, and
+# which ones exist depends on the sync config, so reserving only the live ones
+# would let a job take `source:telegram` while telegram is switched off and then
+# be silently replaced the moment it is switched back on.
+RESERVED_JOB_IDS = frozenset({"cleanup", "wakeup_sweep"})
+RESERVED_JOB_ID_PREFIX = "source:"
+
+
+def is_reserved_job_id(job_id: str) -> bool:
+    """True if *job_id* belongs to the daemon and can't be used by a cron job."""
+    return job_id in RESERVED_JOB_IDS or job_id.startswith(RESERVED_JOB_ID_PREFIX)
+
+
+def describe_reserved_job_ids() -> str:
+    """Human-readable summary of the reservation, for logs and CLI output."""
+    return (
+        f"{', '.join(sorted(RESERVED_JOB_IDS))}, "
+        f"and anything starting with '{RESERVED_JOB_ID_PREFIX}'"
+    )
+
+
+def _none_to_empty(value: Any) -> Any:
+    """``None`` becomes ``[]``; every other value is returned verbatim.
+
+    A bare ``run_if:`` / ``skip_when_idle:`` key parses to None and means "no
+    gates". Nothing else does — see :meth:`CronJob.from_dict`.
+    """
+    return [] if value is None else value
+
+
 @dataclass
 class CronJob:
     """A cron job definition."""
@@ -141,27 +173,66 @@ class CronJob:
         return self.prompt
 
     def _build_gates(self) -> list["CronGate"]:
-        """Construct gate objects from run_if plus the legacy shorthand."""
-        from nerve.cron.gates import build_gates
+        """Construct gate objects from run_if plus the legacy shorthand.
 
+        A spec that cannot be built raises out of __post_init__ and takes the
+        whole job with it — see :func:`nerve.cron.gates.build_gates` for why that
+        beats quietly dropping the gate. The same goes for the two fields
+        themselves: both hold whatever the config said (from_dict normalizes only
+        a bare key), so either may be the wrong shape here, and a shape nobody
+        can read is not permission to run the job unguarded.
+
+        Messages name the job and the offending value, because that is what the
+        operator has to go and fix — and for a spec, what reaches the reload's
+        400.
+        """
+        from nerve.cron.gates import GateConfigError, build_gates
+
+        if not isinstance(self.run_if, list):
+            raise GateConfigError(
+                f"Cron job {self.id!r}: 'run_if' must be a list of gate specs, "
+                f"got {self.run_if!r}"
+            )
         specs: list[dict] = list(self.run_if)
         # Translate the legacy skip_when_idle shorthand into a messages gate
         # so old configs keep working without rewrites.
+        if not isinstance(self.skip_when_idle, list):
+            raise GateConfigError(
+                f"Cron job {self.id!r}: 'skip_when_idle' must be a list of "
+                f"source names, got {self.skip_when_idle!r}"
+            )
         if self.skip_when_idle:
             specs.append({
                 "type": "messages",
                 "sources": list(self.skip_when_idle),
                 "consumer": self.idle_consumer,
             })
-        return build_gates(specs)
+        try:
+            return build_gates(specs)
+        except GateConfigError as e:
+            raise GateConfigError(f"Cron job {self.id!r}: {e}") from e
 
     @classmethod
-    def from_dict(cls, d: dict, base_dir: Path | None = None) -> CronJob:
+    def from_dict(
+        cls, d: dict, base_dir: Path | None = None, *, gates: bool = True,
+    ) -> CronJob:
+        """Build a job from its YAML mapping.
+
+        ``gates=False`` attaches the gate specs without building them. Only
+        ``nerve config validate`` wants that: it never loads the bundle's gate
+        plugins, so every plugin-provided type looks unregistered to it, and
+        building would refuse jobs that are in fact fine. It checks the specs
+        itself instead — per type and per field — and reports an unrecognized
+        type as unverified rather than wrong.
+        """
         job = cls(
             id=d["id"],
             schedule=d["schedule"],
             prompt=d.get("prompt", ""),
-            prompt_file=d.get("prompt_file", ""),
+            # Blank means unset: it is truthy, and it outranks ``prompt`` below,
+            # so a stray space would beat a perfectly good inline prompt and
+            # then fail every run trying to read a file named for a space.
+            prompt_file=str(d.get("prompt_file") or "").strip(),
             workflow=d.get("workflow"),
             description=d.get("description", ""),
             model=d.get("model", ""),
@@ -174,12 +245,27 @@ class CronJob:
             catchup=d.get("catchup", True),
             enabled=d.get("enabled", True),
             lock=bool(d.get("lock", False)),
-            run_if=d.get("run_if", []),
-            skip_when_idle=d.get("skip_when_idle", []),
+            # A bare `run_if:` parses to None, which means "no gates" and must
+            # not reach gate construction. Only None is normalized: any other
+            # wrong shape (`run_if: {}`) is kept verbatim so validation can
+            # reject it, rather than silently reading as an ungated job.
+            #
+            # Held back when gates aren't being built, so __post_init__ has
+            # nothing to construct; the real values are attached below.
+            run_if=_none_to_empty(d.get("run_if")) if gates else [],
+            skip_when_idle=(
+                _none_to_empty(d.get("skip_when_idle")) if gates else []
+            ),
             idle_consumer=d.get("idle_consumer", "inbox"),
             show_session_label=d.get("show_session_label", True),
             metadata=d.get("metadata", {}),
         )
+        if not gates:
+            # Attached after construction, so ``gates`` stays empty while the
+            # specs are still there to be inspected. The pair is deliberately
+            # inconsistent and only validation ever sees it.
+            job.run_if = _none_to_empty(d.get("run_if"))
+            job.skip_when_idle = _none_to_empty(d.get("skip_when_idle"))
         if job.prompt_file:
             p = Path(job.prompt_file).expanduser()
             if not p.is_absolute() and base_dir is not None:
@@ -188,8 +274,32 @@ class CronJob:
         return job
 
 
-def load_jobs(jobs_file: Path) -> list[CronJob]:
-    """Load cron jobs from a YAML file."""
+def load_jobs(
+    jobs_file: Path,
+    strict: bool = False,
+    errors: list[str] | None = None,
+    *,
+    build_gates: bool = True,
+) -> list[CronJob]:
+    """Load cron jobs from a YAML file.
+
+    By default this is *tolerant*: a YAML parse failure or an invalid job entry
+    is logged and skipped (so a typo never takes down daemon startup). With
+    ``strict=True`` any such failure raises :class:`nerve.config.ConfigError`
+    instead — used by hot-reload so a malformed file is refused rather than
+    silently unscheduling every job. A missing file is never an error (returns
+    ``[]``) in either mode.
+
+    Pass ``errors`` to collect per-job failures instead of raising or logging
+    them: each bad entry appends one message and is skipped, and the jobs that
+    did build are still returned. ``nerve config validate`` needs that, because
+    raising on the first bad job would hide every problem after it in the same
+    file, and its whole job is to list them all in one pass. File-level failures
+    still follow ``strict``.
+
+    ``build_gates=False`` is passed straight to :meth:`CronJob.from_dict`; see
+    there for who wants it and why.
+    """
     if not jobs_file.exists():
         logger.info("No cron jobs file at %s", jobs_file)
         return []
@@ -199,25 +309,52 @@ def load_jobs(jobs_file: Path) -> list[CronJob]:
             data = yaml.safe_load(f) or {}
     except Exception as e:
         logger.error("Failed to load cron jobs from %s: %s", jobs_file, e)
+        if strict:
+            from nerve.config import ConfigError
+            raise ConfigError(f"Failed to parse cron file {jobs_file}: {e}") from e
         return []
 
-    jobs_data = data.get("jobs", [])
-    if isinstance(data, list):
-        jobs_data = data
+    jobs_data = data.get("jobs", []) if isinstance(data, dict) else data
+    if not isinstance(jobs_data, list):
+        if strict:
+            from nerve.config import ConfigError
+            raise ConfigError(
+                f"Cron file {jobs_file} must contain a 'jobs:' list"
+            )
+        logger.error("Cron file %s has no valid 'jobs' list — ignoring", jobs_file)
+        return []
 
     jobs = []
     for item in jobs_data:
         try:
-            jobs.append(CronJob.from_dict(item, base_dir=jobs_file.parent))
+            jobs.append(CronJob.from_dict(
+                item, base_dir=jobs_file.parent, gates=build_gates,
+            ))
         except (KeyError, TypeError, ValueError) as e:
+            message = f"Invalid cron job in {jobs_file}: {item!r} — {e}"
+            if errors is not None:
+                errors.append(message)
+                continue
             logger.warning("Invalid cron job definition: %s — %s", item, e)
+            if strict:
+                from nerve.config import ConfigError
+                raise ConfigError(message) from e
 
     logger.info("Loaded %d cron jobs from %s", len(jobs), jobs_file)
     return jobs
 
 
 def save_jobs(jobs: list[CronJob], jobs_file: Path) -> None:
-    """Save cron jobs to a YAML file."""
+    """Save cron jobs to a YAML file.
+
+    Guarded even though nothing calls it today: the file it writes is
+    ``<workspace>/config/cron/jobs.yaml`` on a migrated install, which is tracked
+    config, and a guard added when the first caller appears is a guard that was
+    missing for however long the caller took to notice.
+    """
+    from nerve.config import ensure_path_not_tracked_config
+
+    ensure_path_not_tracked_config(jobs_file, "save cron jobs to")
     jobs_file.parent.mkdir(parents=True, exist_ok=True)
     data = {"jobs": []}
     for job in jobs:

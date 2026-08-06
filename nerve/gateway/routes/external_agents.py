@@ -22,7 +22,7 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from nerve.config import get_config, set_config
+from nerve.config import ensure_not_locked, get_config, set_config
 from nerve.external_agents.registry import AGENT_REGISTRY
 from nerve.gateway.auth import require_auth
 from nerve.gateway.routes._deps import get_deps
@@ -125,6 +125,7 @@ async def remove_agent(name: str, user: dict = Depends(require_auth)) -> dict[st
     user can re-add later without re-bootstrapping. To wipe the files
     too, they should delete them manually.
     """
+    ensure_not_locked("remove an external agent")
     config = get_config()
     before = len(config.external_agents.targets)
     config.external_agents.targets = [
@@ -139,6 +140,7 @@ async def remove_agent(name: str, user: dict = Depends(require_auth)) -> dict[st
 
 
 def _toggle_agent(name: str, *, enabled: bool) -> ToggleResponse:
+    ensure_not_locked("change external agents")
     config = get_config()
     target = next(
         (t for t in config.external_agents.targets if t.name == name),
@@ -161,10 +163,12 @@ def _persist_external_agents_yaml(config) -> None:
     """
     from pathlib import Path
 
+    from nerve import paths
+
     # Reuse the same config dir resolution the bootstrap wizard uses.
-    # The path stamp lives in ``~/.nerve/config_dir`` after the daemon
-    # starts via ``nerve start``.
-    config_dir_marker = Path("~/.nerve/config_dir").expanduser()
+    # The path stamp lives in the config-dir pointer file under the state dir
+    # after the daemon starts via ``nerve start``.
+    config_dir_marker = paths.config_pointer_file()
     if config_dir_marker.exists():
         try:
             config_dir = Path(config_dir_marker.read_text().strip())

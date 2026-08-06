@@ -195,19 +195,15 @@ class AgentEngine:
         # when Nerve is invoked from within a Claude Code session (e.g. CLI).
         os.environ.pop("CLAUDECODE", None)
 
-        self.config = config
+        self._config = config
         self.db = db
-        self.sessions = SessionManager(
-            db,
-            sticky_period_minutes=config.sessions.sticky_period_minutes,
-            default_backend=config.agent.backend,
-            cron_backend=config.agent.resolved_cron_backend,
-            backend_models={
-                "claude": config.agent.model,
-                "codex": config.codex.model,
-            },
-            default_cwd=str(config.workspace),
-        )
+        # ``default_cwd`` is seeded once and never re-seeded: it comes from
+        # ``workspace``, which the skill manager, the tool context and the memory
+        # bridges also captured at construction, so following a reload here alone
+        # would put the session manager in a different workspace from everything
+        # else. Everything the setter below *does* re-seed follows a reload.
+        self.sessions = SessionManager(db, default_cwd=str(config.workspace))
+        self.config = config
         self._semaphore = asyncio.Semaphore(config.agent.max_concurrent)
         self._memory_bridge = None
         self._xmemory_bridge = None
@@ -297,9 +293,12 @@ class AgentEngine:
         # session by the STICKY rule (stored sessions.backend first, then
         # config) — see _backend_for. ``_session_backends`` mirrors the
         # live client's backend for hot paths (finalize, idle watcher).
+        # Config is handed over as a callable reading this engine's attribute,
+        # so a reload that re-points the engine moves the backends with it and
+        # a single key can never be live here and frozen there.
         self._backends: dict[str, AgentBackend] = build_backends(
             BackendDeps(
-                config=self.config,
+                config=lambda: self.config,
                 db=self.db,
                 registry=self.registry,
                 tool_ctx_factory=self._build_tool_context,
@@ -310,6 +309,43 @@ class AgentEngine:
             )
         )
         self._session_backends: dict[str, str] = {}
+
+    @property
+    def config(self) -> NerveConfig:
+        return self._config
+
+    @config.setter
+    def config(self, config: NerveConfig) -> None:
+        """Adopt a freshly loaded config, moving the seeded collaborators with it.
+
+        A setter rather than a method because assignment is how a config reload
+        hands the new object over, and because the values the session manager was
+        seeded with at construction have to move in the same step. Backend
+        resolution reads ``agent.backend`` live off this object but the session
+        manager holds its own copy for the rows it creates; leaving one behind
+        would route new sessions by the old default while every other read used
+        the new one — live on one side of the engine, frozen on the other, and
+        nothing to say which answer you were looking at.
+
+        The backends need nothing here: they resolve config through a callable
+        onto this attribute, so they follow automatically.
+
+        NOT re-seeded, and so still restart-only: ``agent.max_concurrent`` (its
+        semaphore cannot be resized under in-flight turns) and everything derived
+        from ``workspace``.
+        """
+        self._config = config
+        sessions = getattr(self, "sessions", None)
+        if sessions is not None:
+            sessions.sticky_period_minutes = config.sessions.sticky_period_minutes
+            sessions.default_backend = config.agent.backend
+            sessions.cron_backend = (
+                config.agent.resolved_cron_backend or config.agent.backend
+            )
+            sessions.backend_models = {
+                "claude": config.agent.model,
+                "codex": config.codex.model,
+            }
 
     def set_notification_service(self, service: Any) -> None:
         """Install the notification service used by per-session ``ToolContext``.
@@ -518,7 +554,10 @@ class AgentEngine:
         Returns the list of McpServerConfig.
         """
         from nerve.config import load_claude_code_plugins, load_mcp_servers
-        self._mcp_servers_cache = load_mcp_servers()
+        # Read from the daemon's actual config dir (not the process cwd) so a
+        # reload sees the same config.yaml + workspace/config/settings.yaml that
+        # startup loaded.
+        self._mcp_servers_cache = load_mcp_servers(self.config.config_dir)
         self._claude_code_plugins = load_claude_code_plugins()
         await self._sync_mcp_servers_to_db()
         logger.info(
@@ -573,7 +612,8 @@ class AgentEngine:
             "Each skill should have clear step-by-step instructions for a procedure\n"
             "(e.g., 'how to query the monitoring API', 'how to debug a deployment failure').\n\n"
             "## Step 4: Configure Cron Jobs\n\n"
-            "Set up monitoring cron jobs by editing `~/.nerve/cron/jobs.yaml`.\n"
+            "Set up monitoring cron jobs by editing `<workspace>/config/cron/jobs.yaml`\n"
+            "(legacy installs may still use `~/.nerve/cron/jobs.yaml`).\n"
             "This is the Nerve cron system — NOT the Anthropic SDK or system crontab.\n\n"
             "The YAML format is:\n"
             "```yaml\n"
@@ -770,6 +810,7 @@ class AgentEngine:
                 await self._memory_bridge.memorize_conversation(
                     session_id, context_msgs,
                 )
+                self.schedule_xmemory_transcript(session_id, context_msgs)
                 logger.info(
                     "Indexed %d messages from session %s into memU",
                     len(context_msgs), session_id,
@@ -826,6 +867,37 @@ class AgentEngine:
 
         task.add_done_callback(_done)
 
+    def schedule_xmemory_transcript(
+        self, session_id: str, messages: list[dict],
+    ) -> None:
+        """Mirror a just-memorized message window to xmemory (fire-and-forget).
+
+        Inert unless ``xmemory.index_conversations`` is opted in. Runs as a
+        background task so a slow or failing xmemory never extends the global
+        memorize lock; the bridge isolates its own errors and sends text only
+        (role + content — never thinking or tool blocks/results). Best-effort
+        by design: the sweep watermark is memU's, so a window lost here (task
+        failure or shutdown cancellation) is not retried for xmemory.
+        """
+        bridge = self._xmemory_bridge
+        if bridge is None or not bridge.indexes_conversations or not messages:
+            return
+
+        task = asyncio.create_task(
+            bridge.memorize_conversation(session_id, messages),
+        )
+        self._memorize_bg_tasks.add(task)
+
+        def _done(t: asyncio.Task) -> None:
+            self._memorize_bg_tasks.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.warning(
+                    "xmemory transcript write failed for session %s: %s",
+                    session_id, t.exception(),
+                )
+
+        task.add_done_callback(_done)
+
     async def _memorize_incremental(self, session_id: str) -> int:
         """Index only messages newer than last_memorized_at into memU.
 
@@ -862,6 +934,7 @@ class AgentEngine:
             await self._memory_bridge.memorize_conversation(
                 session_id, new_msgs,
             )
+            self.schedule_xmemory_transcript(session_id, new_msgs)
 
             if latest_ts:
                 await self.db.update_session_fields(

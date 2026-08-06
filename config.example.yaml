@@ -1,5 +1,12 @@
 # Nerve — Personal AI Assistant Configuration
 # Copy to config.yaml and customize. Secrets go in config.local.yaml (gitignored).
+#
+# Any string value may reference an environment variable — the recommended way
+# to keep secrets out of committed/shared config:
+#   key: ${MY_VAR}             # required — load fails if MY_VAR is unset
+#   key: ${MY_VAR:-default}    # optional — uses default when unset/empty
+# Only the braced ${...} form is interpolated; a bare "$" is left untouched
+# (so bcrypt hashes / jwt secrets are safe). Use $$ for a literal "$".
 
 # Core
 workspace: ~/nerve-workspace    # Path to workspace with SOUL.md, MEMORY.md, etc.
@@ -45,12 +52,19 @@ agent:
   #   opus: claude-opus-5
   # Claude models selectable in the web composer's model picker. The
   # configured `model` above is always offered first; entries here extend
-  # the list. Unset → a built-in current-generation list (opus / sonnet /
-  # haiku). On Bedrock only models named in config are offered (Bedrock
-  # IDs are region-prefixed, so the bare built-ins would not resolve).
+  # the list. Unset → the models the Anthropic Models API reports for your
+  # credentials (see model_discovery below), falling back to a built-in
+  # current-generation list (opus / sonnet / haiku). On Bedrock only models
+  # named in config are offered (Bedrock IDs are region-prefixed, so
+  # neither discovery nor the bare built-ins would resolve).
   # models:
   #   - claude-opus-5
   #   - claude-sonnet-4-6
+  # Ask the Anthropic Models API (GET /v1/models) at startup which models
+  # the configured credentials can reach, so a newly released model shows up
+  # in the picker without a config edit. Ignored when `models` above is set,
+  # on Bedrock, or without an API key. false → always use the built-in list.
+  model_discovery: true
   max_turns: 50                  # Max agentic turns per request
   max_concurrent: 32             # Max concurrent agent sessions
   thinking: max                  # Thinking budget for the main model
@@ -151,13 +165,19 @@ sync:
 
 # Memory (memU)
 memory:
-  chat_model: claude-sonnet-4-6
+  recall_model: claude-sonnet-4-6
   # embed_model: text-embedding-3-small  # Only needed with openai_api_key
 
-# Cron
-cron:
-  system_file: ~/.nerve/cron/system.yaml   # Managed by 'nerve init' — system crons
-  jobs_file: ~/.nerve/cron/jobs.yaml       # Your custom crons — never touched by Nerve
+# Cron — no path keys needed. Cron config lives in <workspace>/config/cron/
+# (system.yaml, jobs.yaml, gates/) and is resolved from the workspace, with a
+# fallback to the legacy ~/.nerve/cron for un-migrated installs.
+#
+# Do NOT pin system_file/jobs_file here unless you really mean it: an explicit
+# value wins outright, so it disables both the workspace location and the
+# fallback, and `nerve init` will keep regenerating a system.yaml nothing reads.
+#
+# Editing the cron files does not apply itself: run `nerve reload`, or let the
+# next workspace sync do it.
 
 # Workflow runs — budget-capped multi-agent jobs (Claude Workflow tool or
 # Codex Ultracode) in dedicated tracked sessions. Nerve meters real dollar

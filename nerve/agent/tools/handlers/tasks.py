@@ -30,6 +30,7 @@ from nerve.agent.tools.schemas import (
     TASK_UPDATE_SCHEMA,
     TASK_WRITE_SCHEMA,
 )
+from nerve.config import ensure_path_not_tracked_config
 from nerve.db.task_statuses import (
     DEFAULT_STATUS,
     STATUS_NAME_RE,
@@ -283,7 +284,7 @@ async def task_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
     if status:
         err = await _validate_status(ctx, status)
         if err:
-            return ToolResult.text(err)
+            return ToolResult.text(err, is_error=True)
 
     # Route done transitions through task_done to ensure file move + FTS sync
     if status == TERMINAL_STATUS:
@@ -292,10 +293,7 @@ async def task_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
     if ctx.db:
         task = await ctx.db.get_task(task_id)
         if not task:
-            return ToolResult.text(f"Task not found: {task_id}")
-
-        if status:
-            await ctx.db.update_task_status(task_id, status)
+            return ToolResult.text(f"Task not found: {task_id}", is_error=True)
 
         new_tags_str = ""
         if raw_tags:
@@ -311,27 +309,15 @@ async def task_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
             else:
                 new_tags_str = tags_to_string(parse_tags_string(raw_tags))
 
-            await ctx.db.update_task_tags(task_id, new_tags_str)
-
         if ctx.workspace and (note or deadline or raw_tags or new_title):
             file_path = ctx.workspace / task["file_path"]
+            ensure_path_not_tracked_config(file_path, "write")
             if file_path.exists():
                 content = await asyncio.to_thread(
                     file_path.read_text, encoding="utf-8",
                 )
                 if new_title:
                     content = re.sub(r"^# .+", f"# {new_title}", content, count=1)
-                    await ctx.db.upsert_task(
-                        task_id=task_id,
-                        file_path=task["file_path"],
-                        title=new_title,
-                        status=status or task["status"],
-                        source=task.get("source"),
-                        source_url=task.get("source_url"),
-                        deadline=deadline or task.get("deadline"),
-                        tags=new_tags_str if raw_tags else (task.get("tags") or ""),
-                        content=content,
-                    )
                 if note:
                     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                     content += f"\n- {today}: {note}"
@@ -358,6 +344,29 @@ async def task_update_handler(ctx: ToolContext, args: dict) -> ToolResult:
                     file_path.write_text, content, encoding="utf-8",
                 )
 
+                final_title = new_title or task["title"]
+                final_status = status or task["status"]
+                final_deadline = deadline or task.get("deadline")
+                final_tags = new_tags_str if raw_tags else (task.get("tags") or "")
+                await ctx.db.upsert_task(
+                    task_id=task_id,
+                    file_path=task["file_path"],
+                    title=final_title,
+                    status=final_status,
+                    source=task.get("source"),
+                    source_url=task.get("source_url"),
+                    deadline=final_deadline,
+                    tags=final_tags,
+                    content=content,
+                )
+                return ToolResult.text(f"Task {task_id} updated.")
+
+        # Fall back to metadata updates when no task file was changed.
+        if status:
+            await ctx.db.update_task_status(task_id, status)
+        if raw_tags:
+            await ctx.db.update_task_tags(task_id, new_tags_str)
+
     return ToolResult.text(f"Task {task_id} updated.")
 
 
@@ -371,6 +380,11 @@ async def task_read_handler(ctx: ToolContext, args: dict) -> ToolResult:
 
         if ctx.workspace:
             file_path = ctx.workspace / task["file_path"]
+            # Deliberately unguarded. Lockdown makes the tracked config subtree
+            # unwritable, not unreadable — it arrives from a repo the agent can
+            # already read, and the HTTP GET for a task doesn't guard either.
+            # Guarding here would refuse a read with a "Cannot write" message
+            # the caller has no way to act on.
             if file_path.exists():
                 content = await asyncio.to_thread(
                     file_path.read_text, encoding="utf-8",
@@ -404,6 +418,7 @@ async def task_write_handler(ctx: ToolContext, args: dict) -> ToolResult:
         return ToolResult.text("Workspace not configured.")
 
     file_path = ctx.workspace / task["file_path"]
+    ensure_path_not_tracked_config(file_path, "write")
     await asyncio.to_thread(file_path.write_text, new_content, encoding="utf-8")
 
     from nerve.tasks.models import (
@@ -414,7 +429,9 @@ async def task_write_handler(ctx: ToolContext, args: dict) -> ToolResult:
     )
     new_title = parse_task_title(new_content) or task["title"]
     frontmatter = parse_task_frontmatter(new_content)
-    new_deadline = frontmatter.get("deadline", task.get("deadline", ""))
+    # The deadline column is a pure projection of the file's Deadline line, so it
+    # comes from the content we just wrote, never from the pre-write snapshot.
+    new_deadline = frontmatter.get("deadline", "")
     new_tags = tags_to_string(parse_tags_string(frontmatter.get("tags", task.get("tags", ""))))
 
     await ctx.db.upsert_task(
@@ -439,7 +456,14 @@ async def task_done_handler(ctx: ToolContext, args: dict) -> ToolResult:
     if ctx.db:
         task = await ctx.db.get_task(task_id)
         if not task:
-            return ToolResult.text(f"Task not found: {task_id}")
+            return ToolResult.text(f"Task not found: {task_id}", is_error=True)
+
+        # Done is a write like any other — it copies the file into done/ and
+        # unlinks the source, so a stored ``file_path`` inside the tracked config
+        # subtree would delete config. Refuse before the status flip, or a
+        # refusal leaves a task marked done whose file never moved.
+        if ctx.workspace:
+            ensure_path_not_tracked_config(ctx.workspace / task["file_path"], "move")
 
         await ctx.db.update_task_status(task_id, "done")
 
@@ -474,6 +498,10 @@ async def task_done_handler(ctx: ToolContext, args: dict) -> ToolResult:
                     file_path=rel_path,
                     title=task["title"],
                     status="done",
+                    source=task.get("source"),
+                    source_url=task.get("source_url"),
+                    deadline=task.get("deadline"),
+                    tags=task.get("tags") or "",
                     content=content,
                 )
 

@@ -20,6 +20,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from nerve import paths
 from nerve.agent.engine import AgentEngine
 from nerve.agent.streaming import broadcaster
 from nerve.config import NerveConfig, get_config
@@ -37,6 +38,7 @@ from nerve.observability.langfuse import (
     flush as langfuse_flush,
     init_langfuse,
 )
+from nerve.utils.aio import stop_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +113,117 @@ async def _send_session_status(
     await websocket.send_json(status_msg)
 
 
+async def _periodic_db_retention(db) -> None:
+    """Opt-in DB retention loop: compact old memorized messages' blocks/thinking
+    JSON, prune append-only telemetry + file snapshots, checkpoint the WAL.
+
+    The file shrink (VACUUM) is an explicit operator step (``nerve db vacuum``),
+    never on this loop.
+
+    Every setting is read from the current config each cycle, so the interval and
+    the retention windows follow a config reload, and switching retention off
+    stops the work from the next tick. Switching it *on* needs a restart: with no
+    task running there is nothing left to notice the flag.
+    """
+    if not get_config().retention.enabled:
+        return
+    while True:
+        retention = get_config().retention
+        await asyncio.sleep(retention.interval_hours * 3600)
+        retention = get_config().retention
+        if not retention.enabled:
+            continue
+        try:
+            report = await db.run_retention(
+                retention_days=retention.retention_days,
+                retention_full_days=retention.retention_full_days,
+            )
+            if (
+                report.get("messages_compacted")
+                or report.get("telemetry_deleted")
+                or report.get("snapshots_deleted")
+            ):
+                logger.info("DB retention: %s", report)
+        except Exception as e:
+            logger.error("DB retention failed: %s", e)
+
+
+async def _periodic_backup(notification_service) -> None:
+    """Opt-in backup loop: hourly tick, runs a bundle when the newest one in the
+    target dir is older than ``backup.interval_hours`` (or none exists).
+
+    The heavy work (consistent DB snapshots + tar) runs in a thread so it never
+    blocks the event loop. Failures notify high-priority — a backup that fails
+    silently is worse than no backup at all.
+
+    The tick runs whether or not backups are on and reads the current config each
+    time, so every ``backup.*`` setting — enabling it included — takes effect
+    without a restart.
+    """
+    from nerve import backup as backup_mod
+
+    nerve_dir = paths.nerve_home()
+    while True:
+        await asyncio.sleep(3600)  # hourly tick
+        config = get_config()
+        bcfg = config.backup
+        interval_s = max(1, bcfg.interval_hours) * 3600
+        target = Path(bcfg.target_dir).expanduser() if bcfg.target_dir else None
+        if not bcfg.enabled or target is None:
+            continue
+        try:
+            age = await asyncio.to_thread(
+                backup_mod.latest_bundle_age_seconds, target,
+            )
+            if age is not None and age < interval_s:
+                continue  # not due yet
+
+            result = await asyncio.to_thread(
+                backup_mod.create_backup,
+                nerve_dir,
+                config.workspace,
+                target,
+                config_dir=config.config_dir,
+                include_workspace=bcfg.include_workspace,
+                include_secrets=True,
+                workspace_excludes=bcfg.workspace_excludes,
+            )
+            deleted = await asyncio.to_thread(
+                backup_mod.prune, target, bcfg.retention_count,
+            )
+            size_str = (
+                f"{result.size / (1024 ** 3):.1f} GB"
+                if result.size >= 1024 ** 3
+                else f"{result.size / (1024 ** 2):.0f} MB"
+            )
+            logger.info(
+                "Scheduled backup OK: %s (%s, pruned %d)",
+                result.path.name, size_str, len(deleted),
+            )
+            if bcfg.notify_on_success:
+                await notification_service.send_notification(
+                    session_id="system",
+                    title="💾 Backup OK",
+                    body=(
+                        f"{size_str}, {len(backup_mod.list_bundles(target))} "
+                        f"kept ({result.file_count} files)"
+                    ),
+                    priority="low",
+                )
+        except Exception as e:
+            logger.error("Scheduled backup failed: %s", e, exc_info=True)
+            if bcfg.notify_on_failure:
+                try:
+                    await notification_service.send_notification(
+                        session_id="system",
+                        title="⚠️ Nerve backup FAILED",
+                        body=f"{e}\n\nTarget: {target}",
+                        priority="high",
+                    )
+                except Exception as ne:
+                    logger.error("Backup failure notify failed: %s", ne)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan — initialize DB, engine, channels on startup."""
@@ -140,7 +253,7 @@ async def lifespan(app: FastAPI):
         )
 
     # Initialize database
-    db_path = Path("~/.nerve/nerve.db").expanduser()
+    db_path = paths.db_path()
     db = await init_db(db_path, workspace=config.workspace)
     logger.info("Database initialized at %s", db_path)
 
@@ -156,6 +269,18 @@ async def lifespan(app: FastAPI):
 
     # Wire up routes
     init_deps(_engine, db)
+
+    # Prime the Anthropic model catalog so the composer's model picker
+    # offers every model these credentials can reach (instead of a built-in
+    # list that goes stale on each release). Off the critical path and
+    # best-effort: until it lands — or if it fails — the picker falls back
+    # to the configured/built-in list. Runs after the proxy is up, since
+    # discovery goes through it when proxy.enabled.
+    models_prime_task = None
+    if config.agent.model_discovery:
+        from nerve import models_catalog
+
+        models_prime_task = asyncio.create_task(models_catalog.prime(config))
 
     # Initialize notification service. The engine has a setter so the
     # per-session ``ToolContext`` constructed inside ``engine.run()``
@@ -211,7 +336,9 @@ async def lifespan(app: FastAPI):
     telegram_channel = None
     if config.telegram.enabled and config.telegram.bot_token:
         from nerve.channels.telegram import TelegramChannel
-        telegram_channel = TelegramChannel(config, _engine.router)
+        # get_config, not the object read above: the channel resolves config per
+        # use so a reload reaches the reads that happen per update (dm_policy).
+        telegram_channel = TelegramChannel(get_config, _engine.router)
         telegram_channel.set_notification_service(notification_service)
         _engine.register_channel(telegram_channel)
         await telegram_channel.start()
@@ -220,17 +347,18 @@ async def lifespan(app: FastAPI):
     # Start cron service
     global _cron_service
     cron_task = None
+    ws_sync_task = None
+    ws_sync_stop = None
     try:
         from nerve.cron.service import CronService
         cron = CronService(config, _engine, db)
+        # Wire health-alert notifications before start() so source runners built
+        # during start (and any later reload) pick it up.
+        cron.notification_service = notification_service
         await cron.start()
         cron_task = cron
         _cron_service = cron
         logger.info("Cron service started")
-
-        # Wire notification service to source runners for health alerts
-        for runner in cron._source_runners:
-            runner.set_notification_service(notification_service)
 
         # Register cron jobs that suppress the session label in notifications
         for job in cron._jobs:
@@ -284,7 +412,7 @@ async def lifespan(app: FastAPI):
             from nerve.workflows import init_review_loop_service
 
             _review_loop_service = init_review_loop_service(
-                config, db, _engine, _workflow_run_service,
+                get_config, db, _engine, _workflow_run_service,
             )
             if _review_loop_service is not None:
                 await _review_loop_service.start()
@@ -312,18 +440,21 @@ async def lifespan(app: FastAPI):
                 pass
 
     # One-shot cleanup of retired houseofagents artifacts. Gated on the
-    # NERVE-MANAGED binary existing (~/.nerve/bin/ is ours): a standalone
+    # NERVE-MANAGED binary existing (our own bin/ is ours): a standalone
     # houseofagents install the user runs outside Nerve keeps its
     # ~/.config/houseofagents/config.toml untouched. When it was ours, the
     # config.toml holds plaintext API keys Nerve wrote — park it out of the
     # way; the binary is re-downloadable and just deleted. Best-effort —
-    # never blocks startup.
+    # never blocks startup. The two Nerve-owned paths go through the path
+    # provider so a NERVE_HOME install cleans up its own artifacts instead of
+    # inspecting a directory it never wrote to; the houseofagents config path
+    # is that tool's own and stays literal.
     try:
-        hoa_binary = Path("~/.nerve/bin/houseofagents").expanduser()
+        hoa_binary = paths.nerve_path("bin", "houseofagents")
         if hoa_binary.exists():
             hoa_config = Path("~/.config/houseofagents/config.toml").expanduser()
             if hoa_config.exists() and not hoa_config.is_symlink():
-                retired_dir = Path("~/.nerve/houseofagents-retired").expanduser()
+                retired_dir = paths.nerve_path("houseofagents-retired")
                 retired_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
                 hoa_config.rename(retired_dir / "config.toml.bak")
                 logger.info(
@@ -335,21 +466,37 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("houseofagents artifact cleanup failed: %s", e)
 
+    # Periodically pull the workspace from its git remote and apply (opt-in).
+    if config.workspace_sync.enabled:
+        from nerve.sync_service import run_periodic_sync
+        ws_sync_stop = asyncio.Event()
+        ws_sync_task = asyncio.create_task(
+            run_periodic_sync(config, _engine, _cron_service, ws_sync_stop)
+        )
+
     # Periodic session cleanup. Default cadence is every 6 hours (unchanged);
     # it tightens to hourly only when the opt-in interactive idle auto-close
     # (sessions.interactive_archive_after_hours > 0) is enabled and needs finer resolution.
+    #
+    # This and the loops below re-read get_config() per cycle rather than closing
+    # over the start-up object: a config reload replaces that object, and a loop
+    # holding the old one would keep applying settings the operator has already
+    # changed, with nothing to show for it.
     async def _periodic_cleanup():
         while True:
             interval = (
-                3600 if config.sessions.interactive_archive_after_hours > 0 else 6 * 3600
+                3600
+                if get_config().sessions.interactive_archive_after_hours > 0
+                else 6 * 3600
             )
             await asyncio.sleep(interval)
             try:
                 if _engine:
+                    sessions = get_config().sessions
                     stats = await _engine.sessions.run_cleanup(
-                        archive_after_days=config.sessions.archive_after_days,
-                        max_sessions=config.sessions.max_sessions,
-                        interactive_archive_after_hours=config.sessions.interactive_archive_after_hours,
+                        archive_after_days=sessions.archive_after_days,
+                        max_sessions=sessions.max_sessions,
+                        interactive_archive_after_hours=sessions.interactive_archive_after_hours,
                     )
                     if (
                         stats.get("archived_stale")
@@ -376,7 +523,10 @@ async def lifespan(app: FastAPI):
     async def _periodic_memorize():
         from datetime import datetime, timezone
         while True:
-            await asyncio.sleep(config.sessions.memorize_interval_minutes * 60)
+            interval_minutes = get_config().sessions.memorize_interval_minutes
+            # Keep the diagnostics figure honest about the cadence in force.
+            _memorize_stats["interval_minutes"] = interval_minutes
+            await asyncio.sleep(interval_minutes * 60)
             try:
                 if _engine:
                     result = await _engine.run_memorization_sweep()
@@ -426,102 +576,10 @@ async def lifespan(app: FastAPI):
 
     notify_maintenance_task = asyncio.create_task(_periodic_notify_maintenance())
 
-    # Periodic DB retention (opt-in). Compacts old memorized messages'
-    # blocks/thinking JSON and prunes append-only telemetry + file snapshots,
-    # then checkpoints the WAL. No-ops unless retention.enabled is set. The
-    # file shrink (VACUUM) is an explicit operator step (`nerve db vacuum`),
-    # never on this loop.
-    async def _periodic_db_retention():
-        if not config.retention.enabled:
-            return
-        interval = config.retention.interval_hours * 3600
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                report = await db.run_retention(
-                    retention_days=config.retention.retention_days,
-                    retention_full_days=config.retention.retention_full_days,
-                )
-                if (
-                    report.get("messages_compacted")
-                    or report.get("telemetry_deleted")
-                    or report.get("snapshots_deleted")
-                ):
-                    logger.info("DB retention: %s", report)
-            except Exception as e:
-                logger.error("DB retention failed: %s", e)
-
-    db_retention_task = asyncio.create_task(_periodic_db_retention())
-
-    # Periodic backup (opt-in). Hourly tick; runs a bundle when the newest
-    # one in the target dir is older than interval_hours (or none exists).
-    # The heavy work (consistent DB snapshots + tar) runs in a thread so it
-    # never blocks the event loop. Failures notify high-priority — a backup
-    # that fails silently is worse than no backup at all.
-    async def _periodic_backup():
-        from nerve import backup as backup_mod
-
-        bcfg = config.backup
-        nerve_dir = Path("~/.nerve").expanduser()
-        interval_s = max(1, bcfg.interval_hours) * 3600
-        target = Path(bcfg.target_dir).expanduser() if bcfg.target_dir else None
-        while True:
-            await asyncio.sleep(3600)  # hourly tick
-            if not bcfg.enabled or target is None:
-                continue
-            try:
-                age = await asyncio.to_thread(
-                    backup_mod.latest_bundle_age_seconds, target,
-                )
-                if age is not None and age < interval_s:
-                    continue  # not due yet
-
-                result = await asyncio.to_thread(
-                    backup_mod.create_backup,
-                    nerve_dir,
-                    config.workspace,
-                    target,
-                    config_dir=config.config_dir,
-                    include_workspace=bcfg.include_workspace,
-                    include_secrets=True,
-                    workspace_excludes=bcfg.workspace_excludes,
-                )
-                deleted = await asyncio.to_thread(
-                    backup_mod.prune, target, bcfg.retention_count,
-                )
-                size_str = (
-                    f"{result.size / (1024 ** 3):.1f} GB"
-                    if result.size >= 1024 ** 3
-                    else f"{result.size / (1024 ** 2):.0f} MB"
-                )
-                logger.info(
-                    "Scheduled backup OK: %s (%s, pruned %d)",
-                    result.path.name, size_str, len(deleted),
-                )
-                if bcfg.notify_on_success:
-                    await notification_service.send_notification(
-                        session_id="system",
-                        title="💾 Backup OK",
-                        body=(
-                            f"{size_str}, {len(backup_mod.list_bundles(target))} "
-                            f"kept ({result.file_count} files)"
-                        ),
-                        priority="low",
-                    )
-            except Exception as e:
-                logger.error("Scheduled backup failed: %s", e, exc_info=True)
-                if bcfg.notify_on_failure:
-                    try:
-                        await notification_service.send_notification(
-                            session_id="system",
-                            title="⚠️ Nerve backup FAILED",
-                            body=f"{e}\n\nTarget: {target}",
-                            priority="high",
-                        )
-                    except Exception as ne:
-                        logger.error("Backup failure notify failed: %s", ne)
-
-    backup_task = asyncio.create_task(_periodic_backup())
+    # Both opt-in, both no-ops unless their config says otherwise; see their
+    # docstrings for which of their settings survive a config reload.
+    db_retention_task = asyncio.create_task(_periodic_db_retention(db))
+    backup_task = asyncio.create_task(_periodic_backup(notification_service))
 
     # Start the external-agents sync service. It re-renders
     # ~/.codex/AGENTS.md, ~/.claude/CLAUDE.md, etc. from the workspace
@@ -606,9 +664,10 @@ async def lifespan(app: FastAPI):
             logger.warning("Codex thread sync shutdown raised: %s", e)
         _codex_thread_sync = None
 
-    # Stop the external-agents sync service. Cheap — it just cancels
-    # the periodic loop; no per-file cleanup needed because every write
-    # is already atomic (temp + rename).
+    # Stop the external-agents sync service. It exits through its own stop event
+    # so a sweep in flight finishes the whole target set rather than stopping
+    # partway down it; cancellation is the backstop. Individual writes need no
+    # cleanup — each is atomic (temp + rename).
     if _external_agents_sync is not None:
         try:
             await _external_agents_sync.stop()
@@ -622,6 +681,14 @@ async def lifespan(app: FastAPI):
     # the telegram polling task before we get a chance to stop it cleanly.
     if telegram_channel:
         await telegram_channel.stop()
+    if ws_sync_task:
+        # Exit through the loop's own stop path rather than cancelling it where
+        # it stands: a cycle interrupted between the merge and the reload leaves
+        # the workspace on the new commit with the daemon still running the old
+        # config. The git phase runs in a worker thread and so is out of reach of
+        # cancellation either way; the bounded wait is for the reload that
+        # follows it. Cancellation is the backstop, not the mechanism.
+        await stop_background_task(ws_sync_task, ws_sync_stop, "Workspace sync")
     if cron_task:
         await cron_task.stop()
     if _review_loop_service is not None:
@@ -643,6 +710,8 @@ async def lifespan(app: FastAPI):
     idle_sweep_task.cancel()
     memorize_task.cancel()
     cleanup_task.cancel()
+    if models_prime_task is not None and not models_prime_task.done():
+        models_prime_task.cancel()
     await _engine.shutdown()
     # Flush Langfuse spans last — after the engine has reported its final
     # ResultMessage and any in-flight memU spans have completed. ``flush``
@@ -665,6 +734,23 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    # Render a lockdown violation as a clean 403 instead of an opaque 500.
+    from fastapi.responses import JSONResponse
+
+    from nerve.config import LockdownError
+
+    @app.exception_handler(LockdownError)
+    async def _lockdown_handler(request, exc: LockdownError):  # noqa: ANN001
+        return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+    # A malformed skill id is the caller's mistake, not a server fault, and the
+    # id arrives as a path segment so it is trivially reachable.
+    from nerve.skills.manager import SkillIdError
+
+    @app.exception_handler(SkillIdError)
+    async def _skill_id_handler(request, exc: SkillIdError):  # noqa: ANN001
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     # CORS for development
     app.add_middleware(
@@ -907,6 +993,32 @@ def create_app() -> FastAPI:
                       name="gigaku")
             break
 
+    # Favicon from the tracked config subtree (see config.workspace_favicon).
+    # No auth: a browser asks for this before anyone has logged in, so requiring
+    # a token would mean the login page never has an icon.
+    #
+    # Before the static mount for the same reason as /health, and the reason is
+    # not cosmetic here: the SPA catch-all answers every unmatched path with
+    # index.html, so /favicon.ico currently returns HTML with a 200 and the
+    # browser is left to make sense of markup it asked for an image.
+    #
+    # Registered whether or not the frontend has been built. The favicon is
+    # config, not build output, and an instance serving the API without a bundled
+    # UI can still be someone's browser tab.
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon():
+        from fastapi.responses import FileResponse, Response
+
+        from nerve.config import FAVICON_RESPONSE_HEADERS, workspace_favicon
+
+        found = workspace_favicon(get_config().workspace)
+        if found is None:
+            return Response(status_code=404)
+        path, content_type = found
+        return FileResponse(
+            str(path), media_type=content_type, headers=FAVICON_RESPONSE_HEADERS,
+        )
+
     # Serve static web UI files if built
     web_dist = Path(__file__).parent.parent.parent / "web" / "dist"
     if web_dist.exists():
@@ -918,7 +1030,9 @@ def create_app() -> FastAPI:
         # SPA catch-all: serve index.html for any non-API, non-asset route
         @app.get("/{path:path}")
         async def spa_fallback(path: str):
-            # Serve actual files if they exist (favicon, etc.)
+            # Serve actual built files if they exist (robots.txt, manifest, ...).
+            # Not the favicon: that has its own route above and is served from
+            # tracked config rather than the bundle, so it never gets here.
             file_path = web_dist / path
             if file_path.is_file():
                 return FileResponse(str(file_path))

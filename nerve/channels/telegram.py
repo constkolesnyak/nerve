@@ -21,7 +21,7 @@ import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -439,11 +439,13 @@ class TelegramChannel(BaseChannel):
     Delegates session management and agent execution to the ChannelRouter.
     """
 
-    def __init__(self, config: NerveConfig, router: ChannelRouter):
-        self.config = config
+    def __init__(
+        self, config: Callable[[], NerveConfig], router: ChannelRouter,
+    ):
+        self._config = config
         self.router = router
         self._app: Application | None = None
-        self._allowed_users: set[int] = set(config.telegram.allowed_users)
+        self._allowed_users: set[int] = set(self.config.telegram.allowed_users)
         self._notification_service = None  # Set after service is created
         self._watchdog_task: asyncio.Task | None = None
         self._stopping = False
@@ -462,6 +464,21 @@ class TelegramChannel(BaseChannel):
     def set_notification_service(self, service) -> None:
         """Wire the notification service for callback query handling."""
         self._notification_service = service
+
+    @property
+    def config(self) -> NerveConfig:
+        """The live config, resolved per read rather than captured.
+
+        The bot outlives every reload, and ``dm_policy`` decides on each update
+        whether a stranger may talk to the agent. Holding the start-up object
+        meant a reload that tightened ``open`` to ``pairing`` reported success
+        and authorized everyone until the daemon was restarted.
+
+        Only the reads that happen per use follow from this. The bot token was
+        handed to the Application at build time and ``allowed_users`` was copied
+        into a set, so both still need a restart.
+        """
+        return self._config()
 
     @property
     def name(self) -> str:
@@ -1023,10 +1040,29 @@ class TelegramChannel(BaseChannel):
                 )
             return
 
+        # Refuse to pair under lockdown — allowed users must come from the
+        # tracked remote config, not a local runtime edit. Check BEFORE the
+        # in-memory add so lockdown isn't bypassed for the current run.
+        from nerve.config import LockdownError, is_locked
+
+        if is_locked():
+            await update.message.reply_text(
+                "This instance is locked (remote-only). Add your Telegram user "
+                "to telegram.allowed_users in the workspace config repo instead."
+            )
+            return
+
         # Success: authorize in memory and persist to config.local.yaml
         self._allowed_users.add(user_id)
         try:
             append_telegram_allowed_user(self.config.config_dir, user_id)
+        except LockdownError:
+            # Belt-and-suspenders: config was locked between the check and here.
+            self._allowed_users.discard(user_id)
+            await update.message.reply_text(
+                "This instance is locked (remote-only) — pairing is disabled."
+            )
+            return
         except Exception:
             logger.exception("Paired user %d but failed to persist to config", user_id)
             await update.message.reply_text(

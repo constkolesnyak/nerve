@@ -7,7 +7,7 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from nerve.config import get_config
+from nerve.config import ensure_path_not_tracked_config, get_config
 from nerve.db.task_statuses import STATUS_NAME_RE, normalize_color
 from nerve.gateway.auth import require_auth
 from nerve.gateway.routes._deps import (
@@ -129,12 +129,22 @@ async def update_task(task_id: str, req: TaskUpdateRequest, user: dict = Depends
     if req.content:
         config = get_config()
         file_path = config.workspace / task["file_path"]
+        # file_path comes from the DB row, which the task indexer only ever fills
+        # from a glob of tasks/ — but it is still a stored path being joined to
+        # the workspace and written to, so it gets the same guard as every other
+        # caller-influenced write.
+        ensure_path_not_tracked_config(file_path, "write")
         if file_path.exists():
             await asyncio.to_thread(
                 file_path.write_text, req.content, encoding="utf-8",
             )
             # Re-sync title from markdown to SQLite
-            from nerve.tasks.models import parse_task_title, parse_task_frontmatter
+            from nerve.tasks.models import (
+                parse_task_frontmatter,
+                parse_task_title,
+                parse_tags_string,
+                tags_to_string,
+            )
             new_title = parse_task_title(req.content)
             fields = parse_task_frontmatter(req.content)
             await deps.db.upsert_task(
@@ -145,7 +155,7 @@ async def update_task(task_id: str, req: TaskUpdateRequest, user: dict = Depends
                 source=task.get("source"),
                 source_url=task.get("source_url"),
                 deadline=fields.get("deadline") or task.get("deadline"),
-                tags=fields.get("tags") or task.get("tags", ""),
+                tags=tags_to_string(parse_tags_string(fields.get("tags") or task.get("tags", ""))),
                 content=req.content,
             )
 

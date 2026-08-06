@@ -1,6 +1,6 @@
 import { useState, useMemo, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Plus, X, MessageSquare, ChevronRight, ChevronDown, Bot, Loader2, Search, Hammer, MoreHorizontal, Star, Pencil, Trash2, Repeat } from 'lucide-react';
+import { Plus, X, MessageSquare, ChevronRight, ChevronDown, Bot, Loader2, Search, Hammer, MoreHorizontal, Star, Pencil, Trash2, Archive, Repeat } from 'lucide-react';
 import type { Session, AgentStatus } from '../../types/chat';
 import { groupByDate, parseTimestamp } from '../../utils/dateGroups';
 import { useChatStore } from '../../stores/chatStore';
@@ -32,6 +32,28 @@ function formatShortDate(dateStr: string): string {
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
+// Which session groups (Running / Starred / date buckets) the user has
+// collapsed, persisted across reloads. Keyed by the group's visible label,
+// mirroring the quota-safe write-through pattern in helpers/draftStorage.ts —
+// if localStorage is full or disabled the collapse state stays in memory only.
+const COLLAPSED_GROUPS_KEY = 'nerve_sidebar_collapsed_groups';
+
+function loadCollapsedGroups(): Set<string> {
+  try {
+    const raw = localStorage.getItem(COLLAPSED_GROUPS_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(arr) ? arr.filter((x: unknown): x is string => typeof x === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsedGroups(groups: Set<string>): void {
+  try {
+    localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...groups]));
+  } catch { /* quota exceeded / disabled — keep the in-memory state only */ }
+}
+
 export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate, onDelete, collapsed }: {
   sessions: Session[];
   activeSession: string;
@@ -41,6 +63,7 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
   collapsed?: boolean;
 }) {
   const [systemExpanded, setSystemExpanded] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(loadCollapsedGroups);
   const [localQuery, setLocalQuery] = useState('');
   const [searchHovered, setSearchHovered] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
@@ -53,7 +76,7 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const { searchResults, searchLoading, searchSessions, clearSearch, renameSession, toggleStar, virtualSession, discardVirtualSession, sidebarWidth, setSidebarWidth } = useChatStore();
+  const { searchResults, searchLoading, searchSessions, clearSearch, renameSession, toggleStar, archiveSession, virtualSession, discardVirtualSession, sidebarWidth, setSidebarWidth } = useChatStore();
   const searchFocusNonce = useChatStore(s => s.searchFocusNonce);
 
   // Drag-to-resize the session list. It is left-anchored against the nav rail,
@@ -208,6 +231,40 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
 
   const groupedConversations = useMemo(() => groupByDate(restConversations), [restConversations]);
 
+  // Collapse/expand a session group (Running / Starred / a date bucket),
+  // persisting the new set so it survives a reload.
+  const toggleGroup = useCallback((label: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      saveCollapsedGroups(next);
+      return next;
+    });
+  }, []);
+
+  // Never leave the active session hidden inside a collapsed group: when the
+  // active session changes, expand whichever group holds it — once, so a later
+  // manual collapse of that same group still sticks.
+  const autoExpandedForRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeSession || autoExpandedForRef.current === activeSession) return;
+    let label: string | null = null;
+    if (pinnedRunning.some(s => s.id === activeSession)) label = 'Running';
+    else if (pinnedStarred.some(s => s.id === activeSession)) label = 'Starred';
+    else label = groupedConversations.find(g => g.items.some(s => s.id === activeSession))?.group ?? null;
+    if (!label) return; // not located yet (sessions still loading) — retry on the next update
+    const found = label;
+    autoExpandedForRef.current = activeSession;
+    setCollapsedGroups(prev => {
+      if (!prev.has(found)) return prev;
+      const next = new Set(prev);
+      next.delete(found);
+      saveCollapsedGroups(next);
+      return next;
+    });
+  }, [activeSession, pinnedRunning, pinnedStarred, groupedConversations]);
+
   // Count running system sessions for the badge
   const runningSystemCount = useMemo(
     () => systemSessions.filter(s => s.is_running).length,
@@ -293,7 +350,7 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 min-h-0 overflow-y-auto">
         {/* Search results mode */}
         {isSearching ? (
           <div>
@@ -321,6 +378,7 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
                       onDelete={onDelete}
                       onRename={renameSession}
                       onToggleStar={toggleStar}
+                      onArchive={archiveSession}
                       showDate
                     />
                   ))
@@ -361,10 +419,14 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
             {/* Pinned running sessions */}
             {pinnedRunning.length > 0 && (
               <div>
-                <div className="px-3 pt-2 pb-0.5">
-                  <span className="text-[10px] text-emerald-600/70 font-medium">Running</span>
-                </div>
-                {pinnedRunning.map((s) => (
+                <GroupHeader
+                  label="Running"
+                  count={pinnedRunning.length}
+                  collapsed={collapsedGroups.has('Running')}
+                  tone="text-emerald-600/70"
+                  onToggle={() => toggleGroup('Running')}
+                />
+                {!collapsedGroups.has('Running') && pinnedRunning.map((s) => (
                   <SessionItem
                     key={s.id}
                     session={s}
@@ -373,6 +435,7 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
                     onDelete={onDelete}
                     onRename={renameSession}
                     onToggleStar={toggleStar}
+                    onArchive={archiveSession}
                   />
                 ))}
               </div>
@@ -382,10 +445,14 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
                 stable while browsing, since opening a chat doesn't bump it) */}
             {pinnedStarred.length > 0 && (
               <div>
-                <div className="px-3 pt-2 pb-0.5">
-                  <span className="text-[10px] text-yellow-600/70 font-medium">Starred</span>
-                </div>
-                {pinnedStarred.map((s) => (
+                <GroupHeader
+                  label="Starred"
+                  count={pinnedStarred.length}
+                  collapsed={collapsedGroups.has('Starred')}
+                  tone="text-yellow-600/70"
+                  onToggle={() => toggleGroup('Starred')}
+                />
+                {!collapsedGroups.has('Starred') && pinnedStarred.map((s) => (
                   <SessionItem
                     key={s.id}
                     session={s}
@@ -394,6 +461,7 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
                     onDelete={onDelete}
                     onRename={renameSession}
                     onToggleStar={toggleStar}
+                    onArchive={archiveSession}
                   />
                 ))}
               </div>
@@ -406,10 +474,13 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
 
             {groupedConversations.map(({ group, items }) => (
               <div key={group}>
-                <div className="px-3 pt-2.5 pb-0.5">
-                  <span className="text-[10px] text-text-faint font-medium">{group}</span>
-                </div>
-                {items.map((s) => (
+                <GroupHeader
+                  label={group}
+                  count={items.length}
+                  collapsed={collapsedGroups.has(group)}
+                  onToggle={() => toggleGroup(group)}
+                />
+                {!collapsedGroups.has(group) && items.map((s) => (
                   <SessionItem
                     key={s.id}
                     session={s}
@@ -418,6 +489,7 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
                     onDelete={onDelete}
                     onRename={renameSession}
                     onToggleStar={toggleStar}
+                    onArchive={archiveSession}
                   />
                 ))}
               </div>
@@ -476,6 +548,32 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
         )}
       </div>
     </div>
+  );
+}
+
+
+/** Collapsable session-group header: chevron + label, with a hidden-count hint when collapsed. */
+function GroupHeader({ label, count, collapsed, tone, onToggle }: {
+  label: string;
+  count: number;
+  collapsed: boolean;
+  tone?: string;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      onClick={onToggle}
+      className="flex items-center gap-1 px-3 pt-2 pb-0.5 w-full text-left cursor-pointer hover:bg-surface-raised/60 transition-colors"
+    >
+      {collapsed
+        ? <ChevronRight size={10} className="shrink-0 text-text-faint" />
+        : <ChevronDown size={10} className="shrink-0 text-text-faint" />
+      }
+      <span className={`text-[10px] font-medium ${tone ?? 'text-text-faint'}`}>{label}</span>
+      {collapsed && count > 0 && (
+        <span className="text-[10px] text-text-faint/60 tabular-nums">{count}</span>
+      )}
+    </button>
   );
 }
 
@@ -564,13 +662,14 @@ function StatusIndicator({ session, isActive, isRunning }: {
 }
 
 
-function SessionItem({ session, isActive, isRunning, onDelete, onRename, onToggleStar, showDate }: {
+function SessionItem({ session, isActive, isRunning, onDelete, onRename, onToggleStar, onArchive, showDate }: {
   session: Session;
   isActive: boolean;
   isRunning: boolean;
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => Promise<void>;
   onToggleStar: (id: string) => Promise<void>;
+  onArchive: (id: string) => Promise<void>;
   showDate?: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -707,6 +806,18 @@ function SessionItem({ session, isActive, isRunning, onDelete, onRename, onToggl
             >
               <Pencil size={14} />
               Rename
+            </button>
+            <button
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setMenuOpen(false);
+                onArchive(session.id);
+              }}
+              className="flex items-center gap-2.5 w-full px-3 py-1.5 text-[13px] text-text-secondary hover:bg-border-subtle cursor-pointer transition-colors"
+            >
+              <Archive size={14} />
+              Archive
             </button>
             <div className="border-t border-border my-1" />
             <button
