@@ -1849,9 +1849,22 @@ def cron(ctx: click.Context, job_id: str) -> None:
             engine = AgentEngine(config, db)
             await engine.initialize()
 
+            # Wire notifications the same way the gateway does — without this,
+            # a manually-fired job runs with ctx.notification_service = None and
+            # its `notify` silently has nowhere to go (found 2026-08-06: two
+            # manual runs in a row lost their reports). Delivery works from
+            # this standalone process too: the service falls back to a bare
+            # telegram Bot for sending when no channel router is live.
+            from nerve.agent import tools as agent_tools
+            from nerve.notifications.service import NotificationService
+            notification_service = NotificationService(config, db, engine)
+            engine.set_notification_service(notification_service)
+            agent_tools._notification_service = notification_service
+
             if job_id:
                 from nerve.cron.service import CronService
                 cron_svc = CronService(config, engine, db)
+                cron_svc.notification_service = notification_service
                 await cron_svc.run_job(job_id)
             else:
                 click.echo("Available jobs:")

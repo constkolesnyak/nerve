@@ -912,9 +912,18 @@ class NotificationService:
     def _get_telegram_bot(self):
         """Get the Telegram bot instance, or None if unavailable."""
         channel = self._get_telegram_channel()
-        if not channel:
-            return None
-        return channel._app.bot
+        if channel:
+            return channel._app.bot
+        # No live channel in this process — e.g. a manual `nerve cron <id>`
+        # run, which builds its own engine outside the gateway. Sending is
+        # plain HTTP with the same token, so a bare Bot restores delivery;
+        # only polling must stay exclusive to the daemon. Button callbacks
+        # still work: they arrive at the daemon's polling bot, which reads
+        # the same notifications table.
+        if self.config.telegram.enabled and self.config.telegram.bot_token:
+            from telegram import Bot
+            return Bot(self.config.telegram.bot_token)
+        return None
 
     def _build_telegram_text(
         self, session_id: str, title: str, body: str, priority: str,
