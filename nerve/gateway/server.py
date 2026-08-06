@@ -987,9 +987,12 @@ def create_app() -> FastAPI:
     # Registered BEFORE the SPA catch-all for the same reason as /mcp/v1 above:
     # /{path:path} would shadow it. Guarded so a deployment without either path simply
     # has no /gigaku instead of failing to start.
-    for gigaku_site in (Path("/srv/gigaku"), Path("/root/.nerve/gigaku-site")):
-        if gigaku_site.is_dir():
-            app.mount("/gigaku", StaticFiles(directory=str(gigaku_site), html=True),
+    # os.path.isdir, not Path.is_dir: on a box where /root itself is 0700 for
+    # this user (CI runners), the pathlib probe raises PermissionError and
+    # takes create_app down with it; os.path.isdir just answers False.
+    for gigaku_site in ("/srv/gigaku", "/root/.nerve/gigaku-site"):
+        if os.path.isdir(gigaku_site):
+            app.mount("/gigaku", StaticFiles(directory=gigaku_site, html=True),
                       name="gigaku")
             break
 
