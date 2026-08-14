@@ -10,6 +10,31 @@ export interface TaskStatusDef {
   created_at?: string;
 }
 
+export interface TaskEvent {
+  id: number;
+  task_id: string;
+  /** null on the row recording the task's creation. */
+  from_status: string | null;
+  to_status: string;
+  actor: string;
+  created_at: string;
+}
+
+export interface Task {
+  id: string;
+  title: string;
+  status: string;
+  deadline: string | null;
+  source: string;
+  source_url: string | null;
+  tags: string;
+  /** Board rank within its lane, ascending. Server-assigned. */
+  position: number;
+  created_at: string;
+  updated_at: string;
+  content?: string;
+}
+
 export interface UltracodeUsage {
   input_tokens?: number;
   cached_input_tokens?: number;
@@ -216,6 +241,43 @@ export function getToken(): string | null {
   return authToken;
 }
 
+/** Response header carrying a server-refreshed session token. */
+const SESSION_TOKEN_HEADER = 'X-Nerve-Token';
+
+/**
+ * Adopt a slid session token. The gateway re-mints the token once it is past
+ * half its lifetime and returns it on the response, so a tab that keeps
+ * talking to the server never expires — no daily re-login, no logout
+ * mid-sentence.
+ */
+function absorbRefreshedToken(res: Response): void {
+  const fresh = res.headers.get(SESSION_TOKEN_HEADER);
+  if (fresh && fresh !== authToken) setToken(fresh);
+}
+
+/**
+ * What to do when the server says 401. Registered by the auth store so this
+ * module doesn't have to import it (that would be a cycle).
+ *
+ * The default is deliberately NOT `window.location.reload()`: a reload is how
+ * an expired token used to destroy whatever you were typing. Any background
+ * poll could trip it, the page would blow away mid-keystroke, and an unsent
+ * draft in a *new* chat — whose session id lives only in memory — was
+ * orphaned and then swept by pruneDrafts. The app now stays mounted and asks
+ * for the password over the top of your work.
+ */
+let onUnauthorized: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: () => void): void {
+  onUnauthorized = handler;
+}
+
+function handleUnauthorized(): Error {
+  clearToken();
+  onUnauthorized?.();
+  return new Error('Unauthorized');
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -227,10 +289,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
 
+  absorbRefreshedToken(res);
+
   if (res.status === 401) {
-    clearToken();
-    window.location.reload();
-    throw new Error('Unauthorized');
+    throw handleUnauthorized();
   }
 
   if (!res.ok) {
@@ -306,7 +368,7 @@ export const api = {
     ),
   deleteSession: (id: string) =>
     request<any>(`/sessions/${id}`, { method: 'DELETE' }),
-  updateSession: (id: string, data: { title?: string; starred?: boolean }) =>
+  updateSession: (id: string, data: { title?: string; starred?: boolean; model?: string }) =>
     request<any>(`/sessions/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   getMessages: (sessionId: string, limit = 100) =>
     request<{ messages: any[]; last_usage?: { input_tokens: number; output_tokens: number; cache_creation_input_tokens: number; cache_read_input_tokens: number; cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number }; max_context_tokens: number; num_turns?: number } }>(`/sessions/${sessionId}/messages?limit=${limit}`),
@@ -332,9 +394,10 @@ export const api = {
     }),
 
   // Tasks
-  listTasks: (params?: { status?: string; sort?: string; limit?: number; offset?: number }) => {
+  listTasks: (params?: { status?: string; tag?: string; sort?: string; limit?: number; offset?: number }) => {
     const qs = new URLSearchParams();
     if (params?.status) qs.set('status', params.status);
+    if (params?.tag) qs.set('tag', params.tag);
     if (params?.sort) qs.set('sort', params.sort);
     if (params?.limit !== undefined) qs.set('limit', String(params.limit));
     if (params?.offset !== undefined) qs.set('offset', String(params.offset));
@@ -350,11 +413,54 @@ export const api = {
       `/tasks/search?${qs}`,
     );
   },
+  /** Every board lane in one round trip. */
+  getTaskBoard: (params?: { tag?: string; limit?: number; q?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.tag) qs.set('tag', params.tag);
+    if (params?.q) qs.set('q', params.q);
+    if (params?.limit !== undefined) qs.set('limit', String(params.limit));
+    const q = qs.toString();
+    return request<{
+      statuses: TaskStatusDef[];
+      lanes: { status: string; total: number; tasks: Task[] }[];
+      /** task_id → ISO time it entered its current status. Absent for
+          tasks whose last transition predates the history table. */
+      status_since: Record<string, string>;
+    }>(`/tasks/board${q ? '?' + q : ''}`);
+  },
+  listTaskTags: (includeDone = false) =>
+    request<{ tags: { name: string; count: number }[] }>(
+      `/tasks/tags${includeDone ? '?include_done=true' : ''}`,
+    ),
+  /**
+   * Move a task within or between lanes. Sends the neighbours it should
+   * land between rather than a rank — the server computes the ordering,
+   * so a board a few seconds stale can't write a conflicting position.
+   */
+  moveTask: (id: string, data: { status?: string; before_id?: string | null; after_id?: string | null }) =>
+    request<{ task: Task }>(`/tasks/${id}/move`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  listTaskEvents: (id: string) =>
+    request<{ events: TaskEvent[] }>(`/tasks/${id}/events`),
   getTask: (id: string) => request<any>(`/tasks/${id}`),
-  createTask: (data: { title: string; content?: string; deadline?: string }) =>
-    request<any>('/tasks', { method: 'POST', body: JSON.stringify(data) }),
-  updateTask: (id: string, data: { status?: string; note?: string; content?: string }) =>
-    request<any>(`/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  createTask: (data: {
+    title: string; content?: string; deadline?: string;
+    tags?: string; status?: string; confirm_duplicate?: boolean;
+  }) => request<{ task: Task; message: string }>('/tasks', {
+    method: 'POST', body: JSON.stringify(data),
+  }),
+  /**
+   * Partial update. Server reads `deadline` and `tags` by *presence*: omit
+   * the key to leave the field alone, pass '' to clear it.
+   */
+  updateTask: (id: string, data: {
+    status?: string; note?: string; content?: string; title?: string;
+    deadline?: string; tags?: string;
+  }) => request<{ task: Task; task_id: string; updated: boolean }>(`/tasks/${id}`, {
+    method: 'PATCH', body: JSON.stringify(data),
+  }),
 
   // Task statuses (configurable)
   listTaskStatuses: () =>
@@ -363,6 +469,10 @@ export const api = {
     request<TaskStatusDef>('/task-statuses', { method: 'POST', body: JSON.stringify(data) }),
   updateTaskStatus: (name: string, data: { label?: string; color?: string; description?: string; sort_order?: number }) =>
     request<TaskStatusDef>(`/task-statuses/${encodeURIComponent(name)}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  reorderTaskStatuses: (names: string[]) =>
+    request<{ statuses: TaskStatusDef[] }>('/task-statuses/reorder', {
+      method: 'POST', body: JSON.stringify({ names }),
+    }),
   deleteTaskStatus: (name: string) =>
     request<{ name: string; deleted: boolean }>(`/task-statuses/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
@@ -623,10 +733,10 @@ export const api = {
       body: formData,
     });
 
+    absorbRefreshedToken(res);
+
     if (res.status === 401) {
-      clearToken();
-      window.location.reload();
-      throw new Error('Unauthorized');
+      throw handleUnauthorized();
     }
     if (!res.ok) {
       const body = await res.text();

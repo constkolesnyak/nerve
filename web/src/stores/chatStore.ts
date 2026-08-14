@@ -4,11 +4,13 @@ import { ws } from '../api/websocket';
 import type { WSMessage } from '../api/websocket';
 import type { ChatMessage, MessageBlock, Session, AgentStatus, PanelTab, ModifiedFileSummary } from '../types/chat';
 import { hydrateMessage } from '../utils/hydrateMessage';
+import { isMobileViewport } from '../hooks/useMediaQuery';
 import { randomUUID } from '../utils/uuid';
 // Helpers
 import { cancelAutoClose, clearAllAutoCloseTimers, MAX_COMPLETED_TABS } from './helpers/blockHelpers';
 import { extractTodosFromMessages, extractCCTasksFromMessages } from './helpers/bufferReplay';
 import { loadDrafts, persistDraft, removeDraft, pruneDrafts } from './helpers/draftStorage';
+import { loadVirtualSession, persistVirtualSession, clearVirtualSession } from './helpers/virtualSessionStorage';
 // Handlers
 import { handleThinking, handleToken, handleToolUse, handleToolResult, handleToolOutput, handleDone, handleStopped, handleError, handleWakeup, handleAutoTurn, handleModelChanged } from './handlers/streamingHandlers';
 import { handleSessionUpdated, handleSessionStatus, handleSessionSwitched, handleSessionForked, handleSessionResumed, handleSessionArchived, handleSessionRunning, handleSessionAwaitingInput, handleAnswerInjected, handleUserMessage, handleReviewLoopUpdate } from './handlers/sessionHandlers';
@@ -151,8 +153,16 @@ interface ChatState {
     toolInput: Record<string, unknown>;
   } | null;
 
-  // Sidebar collapse
+  // Sidebar collapse (desktop column — persisted)
   sidebarCollapsed: boolean;
+  /**
+   * Whether the phone-sized off-canvas session drawer is showing. Deliberately
+   * separate from `sidebarCollapsed`: that one is a persisted *desktop*
+   * preference, so driving the drawer with it would both pop the drawer open on
+   * first load and let a phone overwrite the desktop layout. Lives in the store
+   * rather than in ChatPage so the global Cmd+K shortcut can open it.
+   */
+  mobileSidebarOpen: boolean;
 
   // Modified files tracking
   modifiedFiles: ModifiedFileSummary[];
@@ -181,7 +191,13 @@ interface ChatState {
   // Review-loop config for the CURRENT virtual chat; null = panel closed.
   // Bound at session materialization (like newChatBackend) and reset after.
   newChatReviewLoop: NewChatReviewLoop | null;
-  selectedModels: Record<string, string | null>;
+  // Model picked for the CURRENT virtual (unsent) chat, keyed by backend so
+  // a Claude pick can't leak into Codex when the backend toggle moves
+  // (null/absent = backend default). Bound at session materialization and
+  // reset after. Real sessions don't use this — their model lives on the
+  // session row (sessions[].model) and is changed via setSessionModel, so
+  // a pick in one chat never affects any other chat.
+  newChatModels: Record<string, string | null>;
 
   loadSessions: () => Promise<void>;
   switchSession: (id: string) => Promise<void>;
@@ -209,8 +225,10 @@ interface ChatState {
   setNewChatBackend: (backend: string | null) => void;
   /** Patch (or close with null) the new-chat review-loop panel state. */
   setNewChatReviewLoop: (patch: Partial<NewChatReviewLoop> | null) => void;
-  /** Set the model for the next message (null → server default). */
-  setSelectedModel: (backend: string, model: string | null) => void;
+  /** Set the model for the current virtual chat (null → server default). */
+  setNewChatModel: (backend: string, model: string | null) => void;
+  /** Re-point ONE existing session's model (persisted on its row). */
+  setSessionModel: (sessionId: string, model: string) => Promise<void>;
   stopSession: () => void;
   handleWSMessage: (msg: WSMessage) => void;
   addQuote: (text: string, action: QuoteAction) => void;
@@ -231,15 +249,42 @@ interface ChatState {
   answerInteraction: (result: Record<string, string> | null) => void;
   denyInteraction: (message?: string) => void;
   toggleSidebar: () => void;
+  setMobileSidebarOpen: (open: boolean) => void;
+  /** Show/hide the session list, whichever form it takes on this viewport. */
+  toggleSessionList: () => void;
+  /** Make sure the session list is on screen (Cmd+K, before focusing search). */
+  revealSessionList: () => void;
   // Modified files
   fetchModifiedFiles: (sessionId: string) => Promise<void>;
   openFilesPanel: () => void;
 }
 
+/**
+ * Rebuild the unsent chat from its persisted id, if there is one. Dropped
+ * unless it still has draft text — a restored empty "New chat" is just noise
+ * in the sidebar, and the whole point of restoring is the unsent text.
+ */
+function restoreVirtualSession(): Session | null {
+  const stored = loadVirtualSession();
+  if (!stored) return null;
+  const drafts = loadDrafts();
+  if (!(drafts[stored.id] || '').trim()) {
+    clearVirtualSession();
+    return null;
+  }
+  return {
+    id: stored.id, title: '', source: 'web', status: 'created',
+    updated_at: stored.created, is_running: false,
+  };
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   activeSession: '',
-  virtualSession: null,
+  // Rehydrated too: an unsent chat's id is the key its draft is stored under,
+  // so losing the id on reload orphaned the draft. Restoring it brings the
+  // half-written prompt back with the chat.
+  virtualSession: restoreVirtualSession(),
   // Rehydrated from localStorage so unsent composer text survives a reload.
   drafts: loadDrafts(),
   messages: [],
@@ -260,6 +305,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sidebarWidth: parseFloat(localStorage.getItem('nerve_sidebar_width') || '240'),
   pendingInteraction: null,
   sidebarCollapsed: localStorage.getItem('nerve_sidebar_collapsed') === 'true',
+  mobileSidebarOpen: false,
   modifiedFiles: [],
   modifiedFilesCount: 0,
   backgroundTasks: [],
@@ -273,11 +319,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   backendDefault: null,
   newChatBackend: null,
   newChatReviewLoop: null,
-  selectedModels: {
-    claude: localStorage.getItem('nerve_selected_model_claude')
-      || localStorage.getItem('nerve_selected_model') || null,
-    codex: localStorage.getItem('nerve_selected_model_codex') || null,
-  },
+  newChatModels: {},
 
   addQuote: (text: string, action: QuoteAction) => {
     const id = `q${++_quoteId}`;
@@ -404,6 +446,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ sidebarCollapsed: next });
   },
 
+  setMobileSidebarOpen: (open: boolean) => set({ mobileSidebarOpen: open }),
+
+  // Both entry points below branch on the viewport so that the header button
+  // and the keyboard shortcuts stay in agreement — and so neither writes the
+  // persisted desktop preference from a phone.
+  toggleSessionList: () => {
+    if (isMobileViewport()) set({ mobileSidebarOpen: !get().mobileSidebarOpen });
+    else get().toggleSidebar();
+  },
+
+  revealSessionList: () => {
+    if (isMobileViewport()) set({ mobileSidebarOpen: true });
+    else if (get().sidebarCollapsed) get().toggleSidebar();
+  },
+
   // ------------------------------------------------------------------ //
   //  Modified files                                                       //
   // ------------------------------------------------------------------ //
@@ -471,6 +528,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const rlDirty = !!(rl && (rl.goal.trim() || rl.verifier.trim()));
     if (vs && get().activeSession === vs.id && id !== vs.id
         && !(get().drafts[vs.id] || '').trim() && !rlDirty) {
+      clearVirtualSession();
       set((s) => {
         const drafts = { ...s.drafts };
         delete drafts[vs.id];
@@ -552,6 +610,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       id, title: '', source: 'web', status: 'created',
       updated_at: now, is_running: false,
     };
+    // Persist the id: it's the key this chat's draft is written under, and
+    // without it on disk a reload strands the draft under an id nothing
+    // remembers.
+    persistVirtualSession(id, now);
     set({ virtualSession: virtual });
     await get().switchSession(id);
   },
@@ -596,7 +658,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // the session row (and the header badge) carries it from the start,
     // instead of the backend default until the first turn resolves it.
     const effBackend = get().newChatBackend ?? get().backendDefault ?? 'claude';
-    const pickedModel = get().selectedModels[effBackend] ?? undefined;
+    const pickedModel = get().newChatModels[effBackend] ?? undefined;
     const real: Session = await api.createSession(
       undefined, get().newChatBackend, rlCwd, rlPayload, pickedModel,
     );
@@ -611,11 +673,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // now owns the draft.
       removeDraft(vs.id);
       if (carried) persistDraft(real.id, carried);
+      // The chat is real now — nothing left to restore on reload.
+      clearVirtualSession();
       return {
         // Don't yank the view if the user navigated away during the POST.
         ...(state.activeSession === vs.id ? { activeSession: real.id } : {}),
         virtualSession: null,
         newChatBackend: null,  // bound into the created session; reset for the next chat
+        newChatModels: {},     // ditto — the pick now lives on the session row
         newChatReviewLoop: null,  // ditto — the loop (if any) is now running server-side
         drafts,
         // POST /api/sessions returns a partial row (no updated_at); fill the
@@ -632,8 +697,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   discardVirtualSession: () => {
     const vs = get().virtualSession;
     if (!vs) return;
-    set({ newChatBackend: null, newChatReviewLoop: null });
+    set({ newChatBackend: null, newChatModels: {}, newChatReviewLoop: null });
     removeDraft(vs.id);
+    clearVirtualSession();
     set((s) => {
       const drafts = { ...s.drafts };
       delete drafts[vs.id];
@@ -749,25 +815,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loadModels: async () => {
     try {
       const res = await api.getModels();
+      // The pick used to be a global localStorage preference that leaked
+      // into every chat; it's per-chat state now — drop the legacy keys.
+      localStorage.removeItem('nerve_selected_model');
+      localStorage.removeItem('nerve_selected_model_claude');
+      localStorage.removeItem('nerve_selected_model_codex');
       set((state) => {
-        // Drop a stale pick (e.g. an Ollama model no longer installed) so we
-        // never send a model the server can't route.
-        const selectedModels = { ...state.selectedModels };
-        for (const backend of ['claude', 'codex']) {
+        // Drop a stale new-chat pick (e.g. an Ollama model no longer
+        // installed) so we never create a session on a model the server
+        // can't route.
+        const newChatModels = { ...state.newChatModels };
+        for (const [backend, selected] of Object.entries(newChatModels)) {
           const ids = new Set(res.models.filter(m => m.backend === backend).map(m => m.id));
-          const selected = selectedModels[backend];
-          if (selected && !ids.has(selected)) {
-            selectedModels[backend] = null;
-            localStorage.removeItem(`nerve_selected_model_${backend}`);
-          }
+          if (selected && !ids.has(selected)) newChatModels[backend] = null;
         }
-        localStorage.removeItem('nerve_selected_model');
         return {
           availableModels: res.models,
           modelDefaults: res.defaults ?? { claude: res.default },
           backendOptions: res.backends?.options ?? [],
           backendDefault: res.backends?.default ?? null,
-          selectedModels,
+          newChatModels,
         };
       });
     } catch (e) {
@@ -783,13 +850,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
       : { ...(s.newChatReviewLoop ?? EMPTY_REVIEW_LOOP), ...patch },
   })),
 
-  setSelectedModel: (backend: string, model: string | null) => {
-    const key = `nerve_selected_model_${backend}`;
-    if (model) localStorage.setItem(key, model);
-    else localStorage.removeItem(key);
-    set((state) => ({
-      selectedModels: { ...state.selectedModels, [backend]: model },
+  setNewChatModel: (backend: string, model: string | null) => set((state) => ({
+    newChatModels: { ...state.newChatModels, [backend]: model },
+  })),
+
+  setSessionModel: async (sessionId: string, model: string) => {
+    // Optimistic: the picker and header badge read sessions[].model, so
+    // re-point the row immediately; revert if the server rejects the pick
+    // (e.g. a model the session's backend can't serve).
+    const prev = get().sessions.find(s => s.id === sessionId)?.model;
+    const repoint = (m: string | undefined) => set((state) => ({
+      sessions: state.sessions.map(s => s.id === sessionId ? { ...s, model: m } : s),
     }));
+    repoint(model);
+    try {
+      await api.updateSession(sessionId, { model });
+    } catch (e) {
+      console.error('Failed to update session model:', e);
+      repoint(prev);
+    }
   },
 
   sendMessage: async (content: string, fileIds?: string[], imageBlocks?: Array<{ url: string; filename: string; media_type: string }>) => {
@@ -806,7 +885,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // socket isn't open, send() returns 'queued' (will flush on reconnect)
     // or 'dropped' (revert below).
     set((state) => ({
-      messages: [...state.messages, { role: 'user' as const, blocks }],
+      messages: [...state.messages, { role: 'user' as const, blocks, created_at: new Date().toISOString() }],
       streamingBlocks: [],
       isStreaming: true,
       agentStatus: { state: 'thinking' as const },
@@ -831,12 +910,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
     }
-    const state = get();
-    const backend = state.sessions.find(s => s.id === session)?.backend
-      ?? state.backendDefault ?? 'claude';
-    const status = ws.sendMessage(
-      content, session, fileIds, state.selectedModels[backend] ?? undefined,
-    );
+    // No per-message model override: the session row is the source of
+    // truth (bound at creation for new chats, PATCHed by setSessionModel
+    // for existing ones), so a pick in another chat can never leak here.
+    const status = ws.sendMessage(content, session, fileIds);
     if (status === 'dropped') {
       // The message could not reach the server. Revert the optimistic
       // state and surface the failure inline so the user knows to retry.
@@ -912,6 +989,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Review loops — global event (session_running pattern): chip state on
       // the observer session row + live milestone append for the open view.
       case 'review_loop_update': return handleReviewLoopUpdate(msg, get, set);
+      // Tasks — global event (session_id is always null), so the board
+      // reflects a change made by the agent in any session, by another
+      // tab, or over the API. Must stay out of VIEW_SCOPED_EVENTS.
+      case 'task_updated':
+        void import('./taskStore').then(({ useTaskStore }) =>
+          useTaskStore.getState().handleTaskEvent(msg.task)
+        );
+        return;
       // Auxiliary
       case 'interaction':              return handleInteraction(msg, get, set);
       case 'interaction_resolved':     return handleInteractionResolved(msg, get, set);
