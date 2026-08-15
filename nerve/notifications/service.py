@@ -238,8 +238,8 @@ class NotificationService:
         # so rules can target the human-readable form ("24 June") and so
         # persisted/delivered text matches what the user sees.
         locale = self.config.notifications.date_locale
-        title = render_iso_dates(title, locale=locale)
-        body = render_iso_dates(body, locale=locale)
+        title = render_iso_dates(title, locale=locale).strip()
+        body = render_iso_dates(body, locale=locale).strip()
         match = await self._match_silence(title, body)
 
         if match and not force:
@@ -308,8 +308,8 @@ class NotificationService:
         """
         notification_id = f"ask-{uuid.uuid4().hex[:8]}"
         locale = self.config.notifications.date_locale
-        title = render_iso_dates(title, locale=locale)
-        body = render_iso_dates(body, locale=locale)
+        title = render_iso_dates(title, locale=locale).strip()
+        body = render_iso_dates(body, locale=locale).strip()
         hours = expiry_hours or self.config.notifications.default_expiry_hours
         expires_at = (
             datetime.now(timezone.utc) + timedelta(hours=hours)
@@ -358,8 +358,8 @@ class NotificationService:
         """
         notification_id = f"approval-{uuid.uuid4().hex[:8]}"
         locale = self.config.notifications.date_locale
-        title = render_iso_dates(title, locale=locale)
-        body = render_iso_dates(body, locale=locale)
+        title = render_iso_dates(title, locale=locale).strip()
+        body = render_iso_dates(body, locale=locale).strip()
 
         # Resolve options. Default to the registered dispatcher's
         # canonical set when none was passed. Falling back to the
@@ -938,7 +938,15 @@ class NotificationService:
         An error notification carries the error marker (💀) instead of the
         priority prefix, so a skull consistently means "something failed" —
         independent of importance. Non-errors use the per-priority prefix.
+
+        Title and body are stripped again here (the write path already
+        strips): rows persisted before that landed still carry trailing
+        newlines, and the session label is appended with a fixed
+        ``\\n\\n``, so an unstripped body would render a ragged gap above
+        it.
         """
+        title = (title or "").strip()
+        body = (body or "").strip()
         if is_error:
             priority_prefix = self.config.notifications.error_prefix
         else:
