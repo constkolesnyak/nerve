@@ -1194,6 +1194,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "anthropic", extra = ["bedrock"] },
+    { name = "anyio" },
     { name = "apscheduler" },
     { name = "bcrypt" },
     { name = "claude-agent-sdk" },
@@ -1227,6 +1228,7 @@ test = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.21.0" },
     { name = "anthropic", extras = ["bedrock"], specifier = ">=0.45.0" },
+    { name = "anyio", specifier = ">=4.14.2" },
     { name = "apscheduler", specifier = ">=3.11.0" },
     { name = "bcrypt", specifier = ">=4.2.0" },
     { name = "claude-agent-sdk", specifier = ">=0.2.140" },
