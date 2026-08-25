@@ -3569,18 +3569,23 @@ class AgentEngine:
 
         The engine's error path (``_run_inner``) does NOT raise on API
         errors such as 503 auth_unavailable — it returns a sentinel string.
+        Neither does the CLI: an upstream failure it could not retry away
+        (``API Error: 529 Overloaded``, 500/502/503/504, rate limits) comes
+        back as the run's *result text*, so a cron run that never happened
+        would otherwise be logged as a success — that is how the weekly
+        ovd-berlin report silently vanished on 2026-08-24.
         Deferred cursor buffers must be discarded on any such failure.
         Errs toward "failed" on ambiguity (empty/blank output), since
         discarding merely reprocesses messages on the next run.
         """
-        if not response or not response.strip():
+        text = (response or "").strip()
+        if not text:
             return True
-        return (
-            response.startswith("Agent error:")
-            or response.startswith(
-                "The conversation contained an unprocessable image"
-            )
-        )
+        return text.startswith((
+            "Agent error:",
+            "API Error:",
+            "The conversation contained an unprocessable image",
+        ))
 
     async def _settle_cursor_buffer(self, session_id: str, response: str) -> None:
         """Commit or discard a cron session's buffered cursors by outcome."""

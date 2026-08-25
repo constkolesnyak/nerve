@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -51,6 +51,48 @@ _AUTH_RECOVERY_SWEEP_SECONDS = 30
 # watchdog uses it both in-memory and to reconstruct its retry queue from
 # cron_logs across a service restart.
 _AUTH_FAILURE_MARKER = "[auth_unavailable]"
+
+# Error-field prefix marking a run that died on a transient upstream failure
+# (529 Overloaded, 5xx, rate limit) while credentials were fine, and that is
+# queued for an automatic re-fire. Distinct from the auth marker so the
+# startup reconstruction does not confuse the two.
+_TRANSIENT_FAILURE_MARKER = "[transient]"
+
+# Backoff ladder for those re-fires: attempt 1 five minutes later, then 15,
+# then 30. Anthropic overload waves last minutes, so the first retry usually
+# lands it; three attempts span ~50 minutes, which is well inside a daily or
+# weekly job's slot and cheap enough for a half-hourly one.
+_TRANSIENT_RETRY_DELAYS = (300, 900, 1800)
+
+# A restart during one of those sleeps would swallow the re-fire, so startup
+# reclaims it: a job whose last run carries the transient marker and failed
+# within this window is re-fired shortly after boot. Kept tight so an instance
+# that was down overnight does not wake up replaying yesterday's runs.
+_TRANSIENT_RESUME_WINDOW_SECONDS = 2 * 3600
+_TRANSIENT_RESUME_DELAY_SECONDS = 60
+
+# Substrings (matched case-insensitively) that mark a failure as transient —
+# something that succeeds on its own a few minutes later. The CLI hands these
+# back as the run's result text ("API Error: 529 Overloaded …"), not as an
+# exception. Auth failures are NOT here: they have their own watchdog, which
+# re-fires on the credential-restored edge instead of on a timer.
+_TRANSIENT_ERROR_PATTERNS = (
+    "api error: 429",
+    "api error: 500",
+    "api error: 502",
+    "api error: 503",
+    "api error: 504",
+    "api error: 529",
+    "overloaded",
+    "rate limit",
+    "rate_limit",
+    "timed out",
+    "timeout",
+    "connection error",
+    "connection reset",
+    "temporarily unavailable",
+    "service unavailable",
+)
 
 # ScheduleWakeup autonomous-loop sentinels (Claude Code /loop). Nerve has no
 # /loop command, so resolve them to a plain continuation instruction.
@@ -250,6 +292,12 @@ def _crontab_to_trigger(
         ) from e
 
 
+def _is_transient_failure(error_text: str) -> bool:
+    """True if a failed run's text looks like a retryable upstream blip."""
+    lowered = (error_text or "").lower()
+    return any(p in lowered for p in _TRANSIENT_ERROR_PATTERNS)
+
+
 def _parse_timestamp(ts: str) -> datetime:
     """Parse a UTC timestamp string from the database into an aware datetime."""
     if "T" not in ts:
@@ -291,6 +339,13 @@ class CronService:
         # (nothing visibly disappeared) — it phrases the message as catching up
         # deferred crons instead. Cleared once the recovery message is sent.
         self._auth_outage_reconstructed: bool = False
+        # job_id -> how many transient-failure re-fires have been scheduled for
+        # its current failure streak. Cleared on the first successful run and
+        # when the ladder is exhausted, so every fresh outage starts at 0.
+        self._transient_attempts: dict[str, int] = {}
+        # Strong references to the sleeping re-fire tasks — asyncio only holds
+        # weak ones, so without this a retry can be garbage-collected mid-sleep.
+        self._transient_retry_tasks: set[asyncio.Task] = set()
         # Set by the gateway before start() so freshly-(re)built source runners
         # get wired to health-alert notifications, including after a reload.
         self.notification_service = None
@@ -395,6 +450,10 @@ class CronService:
         # Rebuild the auth-retry queue from cron logs so an outage that spans a
         # restart still gets its jobs re-fired once tokens return.
         await self._reconstruct_auth_retry_jobs()
+
+        # Same for a transient-failure re-fire that was still sleeping when the
+        # process went down — the run it owed is otherwise lost.
+        await self._resume_transient_retries()
 
         self.scheduler.start()
         logger.info(
@@ -752,6 +811,9 @@ class CronService:
 
     async def stop(self) -> None:
         """Stop the scheduler."""
+        for task in list(self._transient_retry_tasks):
+            task.cancel()
+        self._transient_retry_tasks.clear()
         self.scheduler.shutdown(wait=False)
         logger.info("Cron service stopped")
 
@@ -1232,8 +1294,10 @@ class CronService:
                 )
             else:
                 # Real success — clear any prior auth-failure marker so the
-                # watchdog stops tracking this job.
+                # watchdog stops tracking this job, and end the transient
+                # failure streak so a later outage retries from scratch.
                 self._auth_retry_jobs.discard(job.id)
+                self._transient_attempts.pop(job.id, None)
                 # Keep the tail of the response — for multi-message runs the
                 # final summary lives at the end, not the beginning.
                 output = (
@@ -1263,17 +1327,25 @@ class CronService:
         session_id: str | None,
         error_text: str,
     ) -> None:
-        """Log a failed cron run and, if auth is the cause, queue it to re-fire.
+        """Log a failed cron run and, when it is worth retrying, queue it.
 
         Probes the proxy for ground-truth auth availability. When auth is
         down, the job is added to ``_auth_retry_jobs`` and its logged error is
         prefixed with ``_AUTH_FAILURE_MARKER`` so the queue can be rebuilt from
-        cron_logs after a restart. Non-auth failures are logged as plain
-        errors and left to their normal schedule.
+        cron_logs after a restart. When credentials are fine but the upstream
+        blipped (529 Overloaded and friends), the run is re-fired on the
+        backoff ladder instead — a weekly job must not lose its whole week to
+        a five-minute overload wave. Anything else is logged as a plain error
+        and left to its normal schedule.
+
+        Alerting follows the retry: while a re-fire is pending we stay silent,
+        so the user hears about the failure once, after the last attempt, not
+        once per attempt.
         """
         status = "error"
         error = error_text
         auth_down = not await self._auth_available()
+        retry_pending = False
         if auth_down:
             self._auth_retry_jobs.add(job.id)
             error = f"{_AUTH_FAILURE_MARKER} {error_text}"
@@ -1281,12 +1353,67 @@ class CronService:
                 "Cron job %s failed with auth unavailable — queued for "
                 "immediate re-fire when tokens return", job.id,
             )
+        elif self._schedule_transient_retry(job, error_text):
+            retry_pending = True
+            error = f"{_TRANSIENT_FAILURE_MARKER} {error_text}"
         else:
             logger.error("Cron job %s failed: %s", job.id, error_text)
         await self.db.log_cron_finish(
             log_id, status, error=error, session_id=session_id,
         )
-        await self._notify_run_failure(job, error_text, auth_down)
+        if not retry_pending:
+            await self._notify_run_failure(job, error_text, auth_down)
+
+    def _schedule_transient_retry(self, job: CronJob, error_text: str) -> bool:
+        """Queue a delayed re-fire for a transient failure. True if queued.
+
+        False means the caller owns the failure: the error is not transient,
+        or the backoff ladder is spent (in which case the streak is reset, so
+        the next outage gets its full set of attempts again).
+        """
+        if not _is_transient_failure(error_text):
+            return False
+        attempt = self._transient_attempts.get(job.id, 0)
+        if attempt >= len(_TRANSIENT_RETRY_DELAYS):
+            self._transient_attempts.pop(job.id, None)
+            logger.error(
+                "Cron job %s still failing after %d transient retries: %s",
+                job.id, len(_TRANSIENT_RETRY_DELAYS), error_text,
+            )
+            return False
+        delay = _TRANSIENT_RETRY_DELAYS[attempt]
+        self._transient_attempts[job.id] = attempt + 1
+        logger.warning(
+            "Cron job %s hit a transient failure — re-firing in %ds "
+            "(attempt %d/%d)",
+            job.id, delay, attempt + 1, len(_TRANSIENT_RETRY_DELAYS),
+        )
+        task = asyncio.create_task(self._refire_after(job.id, delay))
+        self._transient_retry_tasks.add(task)
+        task.add_done_callback(self._transient_retry_tasks.discard)
+        return True
+
+    async def _refire_after(self, job_id: str, delay: float) -> None:
+        """Sleep, then re-run a job that died on a transient failure.
+
+        Re-resolves the job from ``_jobs`` at wake-up: a reload may have
+        changed, disabled or removed it while we slept, and the stale object
+        must not be run in that case.
+        """
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        job = next((j for j in self._jobs if j.id == job_id), None)
+        if job is None or not job.enabled:
+            self._transient_attempts.pop(job_id, None)
+            logger.info(
+                "Skipping transient re-fire of %s — job is gone or disabled",
+                job_id,
+            )
+            return
+        logger.info("Re-firing cron job %s after transient failure", job_id)
+        await self._run_job_wrapper(job)
 
     async def _notify_system(
         self, title: str, body: str, priority: str = "high",
@@ -1520,6 +1647,52 @@ class CronService:
                 "Reconstructed auth-retry queue from logs: %s",
                 sorted(self._auth_retry_jobs),
             )
+
+    async def _resume_transient_retries(self) -> None:
+        """Re-fire jobs whose transient retry was cut short by a restart.
+
+        The backoff ladder lives in memory, so a restart during the sleep
+        would otherwise swallow the re-fire and the job would wait for its
+        next tick. Only recent failures qualify: an instance that was down for
+        a day must not wake up and replay stale runs.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            seconds=_TRANSIENT_RESUME_WINDOW_SECONDS,
+        )
+        for job in self._jobs:
+            if not job.enabled:
+                continue
+            try:
+                last = await self.db.get_last_cron_run(job.id)
+            except Exception as e:
+                logger.warning(
+                    "Failed to read last run for %s during transient-retry "
+                    "resume: %s", job.id, e,
+                )
+                continue
+            if not last or last.get("status") != "error":
+                continue
+            if not (last.get("error") or "").startswith(
+                _TRANSIENT_FAILURE_MARKER
+            ):
+                continue
+            finished_at = last.get("finished_at")
+            try:
+                finished = _parse_timestamp(finished_at) if finished_at else None
+            except ValueError:
+                finished = None
+            if finished is None or finished < cutoff:
+                continue
+            self._transient_attempts[job.id] = 1
+            logger.info(
+                "Resuming transient re-fire of %s after restart "
+                "(last run failed at %s)", job.id, last.get("finished_at"),
+            )
+            task = asyncio.create_task(
+                self._refire_after(job.id, _TRANSIENT_RESUME_DELAY_SECONDS),
+            )
+            self._transient_retry_tasks.add(task)
+            task.add_done_callback(self._transient_retry_tasks.discard)
 
     # -- End auth-recovery watchdog ----------------------------------------
 
