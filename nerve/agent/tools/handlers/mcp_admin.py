@@ -42,11 +42,50 @@ def _get_nerve_asgi_app():
     return _nerve_asgi_app
 
 
+def _ensure_route_deps(ctx: ToolContext) -> str | None:
+    """Wire the route dependency container if this process never did.
+
+    ``init_deps`` normally runs once during gateway startup, but the agent
+    also runs in processes that have no gateway: ``nerve cron <job>`` builds
+    its own engine and CronService and fires the job there. Every route the
+    tool reaches then raised "Route dependencies not initialized", which
+    reads like a broken platform — the 2026-08-25 healthcheck reported
+    exactly that as an outage. The dependencies are just (engine, db), and
+    both are on the tool context, so initialize them on first use instead.
+
+    Returns an error string when it cannot, else None.
+    """
+    from nerve.gateway.routes._deps import get_deps, init_deps
+
+    try:
+        get_deps()
+        return None
+    except RuntimeError:
+        pass
+    if ctx.engine is None or ctx.db is None:
+        return (
+            "Error: nerve_api is unavailable here — this process has no "
+            "gateway routes and the tool context carries no engine/db to "
+            "wire them with."
+        )
+    init_deps(ctx.engine, ctx.db)
+    if ctx.notification_service is not None:
+        from nerve.gateway.routes._deps import set_notification_service
+
+        set_notification_service(ctx.notification_service)
+    logger.info("nerve_api: initialized route deps for a non-gateway process")
+    return None
+
+
 async def nerve_api_handler(ctx: ToolContext, args: dict) -> ToolResult:
     """Query Nerve API via in-process ASGI transport — no HTTP round-trip."""
     endpoint = args.get("endpoint", "").strip().strip("/")
     if not endpoint:
         return ToolResult.text("Missing 'endpoint' parameter.")
+
+    deps_error = _ensure_route_deps(ctx)
+    if deps_error:
+        return ToolResult.text(deps_error)
 
     try:
         app = _get_nerve_asgi_app()

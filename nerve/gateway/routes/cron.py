@@ -16,7 +16,15 @@ async def list_cron_jobs(user: dict = Depends(require_auth)):
     from nerve.gateway.server import _cron_service
 
     if not _cron_service:
-        return {"jobs": []}
+        # An empty list here is a lie every caller believes: it is
+        # indistinguishable from "this instance has no cron jobs", which is
+        # how a 2026-08-25 healthcheck concluded the scheduler was empty while
+        # 17 jobs were running in the daemon. Every other route in this file
+        # already says 503; say it here too.
+        raise HTTPException(
+            status_code=503,
+            detail="Cron service not available in this process",
+        )
 
     jobs = await _cron_service.list_jobs()
     return {"jobs": jobs}
