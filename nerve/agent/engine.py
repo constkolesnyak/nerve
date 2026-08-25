@@ -468,8 +468,17 @@ class AgentEngine:
             logger.warning("Failed to get skill summaries: %s", e)
             return None
 
-    async def initialize(self) -> None:
-        """Initialize the agent engine — set up tools and main session."""
+    async def initialize(self, recover_orphans: bool = False) -> None:
+        """Initialize the agent engine — set up tools and main session.
+
+        ``recover_orphans`` belongs to the daemon alone. Orphan recovery asks
+        "is any session active in the DB without a live client *here*?", and
+        for a short-lived CLI process the honest answer for every session the
+        daemon is running right now is "yes" — so a plain ``nerve cron <job>``
+        used to mark the daemon's in-flight sessions stopped, and memorize
+        them, from the outside. It did exactly that to a running healthcheck
+        on 2026-08-25. Only the process that owns the clients may recover.
+        """
         from nerve.memory.memu_bridge import MemUBridge
         self._memory_bridge = MemUBridge(self.config, audit_db=self.db)
         await self._memory_bridge.initialize()
@@ -515,11 +524,12 @@ class AgentEngine:
         # Wire up memorize callback so SessionManager can trigger memU indexing
         self.sessions._on_memorize = self._memorize_session
 
-        # Recover orphaned sessions from previous crash
-        try:
-            await self.sessions.recover_orphaned_sessions()
-        except Exception as e:
-            logger.error("Orphaned session recovery failed: %s", e)
+        # Recover orphaned sessions from a previous crash — daemon only.
+        if recover_orphans:
+            try:
+                await self.sessions.recover_orphaned_sessions()
+            except Exception as e:
+                logger.error("Orphaned session recovery failed: %s", e)
 
         # Worker mode: check if first-boot onboarding is needed
         if self._needs_worker_onboarding():

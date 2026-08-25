@@ -265,7 +265,9 @@ async def lifespan(app: FastAPI):
 
     # Initialize agent engine
     _engine = AgentEngine(config, db)
-    await _engine.initialize()
+    # The daemon owns the session clients, so it is the one process allowed
+    # to recover orphans (see AgentEngine.initialize).
+    await _engine.initialize(recover_orphans=True)
 
     # Wire up routes
     init_deps(_engine, db)
