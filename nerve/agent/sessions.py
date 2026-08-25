@@ -892,11 +892,58 @@ class SessionManager:
     #  Orphan recovery                                                     #
     # ------------------------------------------------------------------ #
 
+    # Closing row written for a turn whose owning run disappeared. The
+    # external watchdog reads "user row with no assistant row after it" as a
+    # wedged turn holding an agent slot and eventually restarts Nerve, so a
+    # recovered session must not leave that shape behind.
+    INTERRUPTED_TURN_MARKER = (
+        "[прогон прерван: процесс, который вёл эту сессию, исчез "
+        "(краш, kill или ручной запуск, закончившийся раньше записи). "
+        "Строка закрывает тур — ответа модели за ним не было.]"
+    )
+
+    async def _close_dangling_turn(self, session_id: str) -> bool:
+        """Close a turn left open by a run that never wrote its reply.
+
+        A run that dies between "user message stored" and "assistant reply
+        stored" leaves a turn nothing will ever finish: the process that owned
+        it is gone, and the recovery below only moves the session's *status*,
+        which the message log knows nothing about. On 2026-08-25 exactly one
+        such row (a manual ``nerve cron`` run whose final writes never landed)
+        had the watchdog one tick away from restarting a healthy daemon.
+
+        Returns True when a closing row was written.
+        """
+        try:
+            recent = await self.db.get_messages(session_id, limit=1)
+        except Exception as e:
+            logger.warning(
+                "Could not read the last message of %s while closing its "
+                "turn: %s", session_id, e,
+            )
+            return False
+        if not recent or recent[-1].get("role") != "user":
+            return False
+        try:
+            await self.add_message(
+                session_id, "assistant", self.INTERRUPTED_TURN_MARKER,
+                bump_updated_at=False,
+            )
+        except Exception as e:
+            logger.warning(
+                "Could not close the dangling turn of %s: %s", session_id, e,
+            )
+            return False
+        logger.info("Orphan recovery: closed a dangling turn in %s", session_id)
+        return True
+
     async def recover_orphaned_sessions(self) -> int:
         """Find sessions marked active in DB that have no live client.
 
-        Called on startup. Sessions with sdk_session_id are marked idle
-        (resumable); sessions without are marked stopped.
+        Called on gateway startup. Sessions with sdk_session_id are marked
+        idle (resumable); sessions without are marked stopped. Either way a
+        turn left mid-flight gets its closing row, so nothing downstream
+        mistakes a dead session for a running one.
 
         Satellite sessions (``source="external"``) are skipped — they're
         managed by a different runtime (Codex, Claude Code, ...) and a
@@ -918,6 +965,8 @@ class SessionManager:
                 # Leave them alone — the owning runtime keeps them active
                 # for as long as it has the thread open.
                 continue
+
+            await self._close_dangling_turn(sid)
 
             if session.get("sdk_session_id"):
                 await self.transition(sid, SessionStatus.IDLE, {
