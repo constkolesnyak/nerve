@@ -208,6 +208,7 @@ def translate_message(message: Any) -> list[ev.AgentEvent]:
             ev.NormalizedUsage.from_anthropic(message.usage)
             if message.usage else None
         )
+        status, error = _result_outcome(message)
         out.append(ev.TurnCompleted(
             native_session_id=message.session_id,
             model=None,  # claude reports the model per AssistantMessage
@@ -218,10 +219,33 @@ def translate_message(message: Any) -> list[ev.AgentEvent]:
             duration_ms=getattr(message, "duration_ms", None),
             duration_api_ms=getattr(message, "duration_api_ms", None),
             num_turns=getattr(message, "num_turns", None),
-            status="completed",
+            status=status,
+            error=error,
         ))
 
     return out
+
+
+def _result_outcome(message: ResultMessage) -> tuple[ev.TurnStatus, str | None]:
+    reason = getattr(message, "terminal_reason", None)
+    if reason in {"aborted_streaming", "aborted_tools"}:
+        return "interrupted", reason.replace("_", " ")
+
+    subtype = getattr(message, "subtype", "")
+    if not getattr(message, "is_error", False) and subtype == "success":
+        return "completed", None
+
+    errors = getattr(message, "errors", None)
+    if errors:
+        detail = "; ".join(errors)
+    elif reason == "max_turns":
+        turns = getattr(message, "num_turns", None)
+        detail = f"max turns ({turns}) exhausted" if turns is not None else "max turns exhausted"
+    elif status := getattr(message, "api_error_status", None):
+        detail = f"API error (HTTP {status})"
+    else:
+        detail = (reason or subtype or "Claude turn failed").replace("_", " ")
+    return "failed", detail
 
 
 def _translate_tool_result(
@@ -555,6 +579,10 @@ class ClaudeBackend:
             hooks=hooks,
             stderr=_cli_stderr,
             extra_args=extra_args,
+            # Per-line cap on the CLI's stdout.  The SDK default (1 MiB) is
+            # fatal to the turn the moment a Read returns a screenshot — see
+            # AgentConfig.cli_max_message_bytes.
+            max_buffer_size=config.agent.cli_max_message_bytes,
             # No allowed_tools — can_use_tool handles permissions.
             # External MCP server tools are discovered at connection time,
             # so we can't enumerate them upfront.
@@ -759,6 +787,7 @@ class ClaudeBackend:
         """
         session_id = spec.session_id
         captured_files: set[str] = set()
+        max_message_bytes = self.config.agent.cli_max_message_bytes
 
         async def _snapshot_hook(hook_input, tool_use_id, context):
             """PreToolUse: capture file content before Edit/Write/NotebookEdit."""
@@ -785,12 +814,17 @@ class ClaudeBackend:
             encodes them into image content blocks. If the file isn't a
             valid image, the API rejects it with 400 and the bad block
             persists in the CLI's history — an unrecoverable poison loop.
-            Check magic bytes and size *before* Read executes.
+            A valid image can still be too big for the SDK transport: the
+            result travels as one stream-json line, and a line over
+            ``max_buffer_size`` aborts the whole turn.  Check magic bytes
+            and both size bounds *before* Read executes.
             """
             tool_input = hook_input.get("tool_input", {})
             file_path = tool_input.get("file_path", "")
 
-            error = validate_image_file(file_path)
+            error = validate_image_file(
+                file_path, max_message_bytes=max_message_bytes,
+            )
             if error:
                 logger.warning(
                     "Blocked Read of invalid image for session %s: %s",
